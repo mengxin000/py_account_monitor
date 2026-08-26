@@ -1,0 +1,11 @@
+{
+  "account_id": "zdl",
+  "api_key": "paste-zdl-api-key",
+  "secret_key": "paste-zdl-secret-key",
+  "subaccount_email": "binance-sub-01@example.com",
+  "output_dir": "runtime/zdl",
+  "rest_interval_seconds": 5,
+  "include_balance": true,
+  "balance_interval_seconds": 60,
+  "rest_base_url": "https://papi.binance.com"
+}

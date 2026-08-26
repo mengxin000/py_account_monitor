@@ -1,0 +1,10 @@
+{
+  "accounts": [
+    "account_zdl.local.json",
+    "account_mfx.local.json",
+    "account_dh.local.json"
+  ],
+  "email_file": "email.local.json",
+  "first_report_delay_seconds": 180,
+  "report_interval_seconds": 1800
+}

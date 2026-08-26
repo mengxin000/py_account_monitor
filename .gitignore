@@ -1,0 +1,16 @@
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+dist/
+build/
+config/*.local.json
+output/
+log/
+config/.api_secret
+.env
+runtime/
+# IDE
+.idea/
+.vscode/
+*.iml

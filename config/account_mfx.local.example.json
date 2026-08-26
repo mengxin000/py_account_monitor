@@ -1,0 +1,11 @@
+{
+  "account_id": "mfx",
+  "api_key": "paste-mfx-api-key",
+  "secret_key": "paste-mfx-secret-key",
+  "subaccount_email": "binance-sub-02@example.com",
+  "output_dir": "runtime/mfx",
+  "rest_interval_seconds": 5,
+  "include_balance": true,
+  "balance_interval_seconds": 60,
+  "rest_base_url": "https://papi.binance.com"
+}

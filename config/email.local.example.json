@@ -1,0 +1,10 @@
+{
+  "address": "smtp://smtp.example.com:587",
+  "user": "monitor@example.com",
+  "pass": "smtp-app-password",
+  "sender": "monitor@example.com",
+  "recipients": ["trader@example.com"],
+  "cc": [],
+  "use_starttls": true,
+  "subject_prefix": "Binance账户监控"
+}

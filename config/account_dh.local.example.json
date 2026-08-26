@@ -1,0 +1,11 @@
+{
+  "account_id": "dh",
+  "api_key": "paste-dh-api-key",
+  "secret_key": "paste-dh-secret-key",
+  "subaccount_email": "binance-sub-03@example.com",
+  "output_dir": "runtime/dh",
+  "rest_interval_seconds": 5,
+  "include_balance": true,
+  "balance_interval_seconds": 60,
+  "rest_base_url": "https://papi.binance.com"
+}

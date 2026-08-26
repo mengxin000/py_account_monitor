@@ -1,0 +1,35 @@
+[project]
+name = "calculate-monitor-binance"
+version = "0.1.0"
+description = "Reusable Binance REST and WebSocket connection layer for account monitoring"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "aiohttp>=3.10,<4",
+    "openpyxl>=3.1,<4",
+]
+
+[project.scripts]
+binance-account-monitor = "collectors.account_monitor:main"
+binance-report = "cli.generate_report:main"
+binance-monitor = "service.daemon:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<9",
+    "pytest-asyncio>=0.24,<2",
+]
+
+[tool.uv]
+package = true
+
+[tool.hatch.build.targets.wheel]
+# Explicit selection keeps source code and configuration in the wheel while
+# excluding local credentials, runtime JSONL and generated reports.
+only-include = ["__init__.py", "core", "collectors", "replay", "cli", "config", "reports", "service"]
+
+[tool.hatch.build.targets.wheel.sources]
+"." = "python_binance"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
