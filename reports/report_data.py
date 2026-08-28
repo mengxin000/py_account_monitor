@@ -71,6 +71,8 @@ class ReportData:
         matched_qty = sum(float(row.get("quantity", 0) or 0) for row in self.matches)
         unmatched_qty = sum(float(row.get("quantity", 0) or 0) for row in self.unmatched)
         total_records = len(self.matches) + len(self.unmatched)
+        profit_count = sum(1 for row in self.matches if float(row.get("profit", 0) or 0) > 0)
+        loss_count = sum(1 for row in self.matches if float(row.get("profit", 0) or 0) < 0)
         return {
             "actual_profit": actual,
             "theoretical_profit": theoretical,
@@ -83,6 +85,9 @@ class ReportData:
             "vibration_breakdown": self.vibration_breakdown(),
             "matched_quantity": matched_qty,
             "unmatched_quantity": unmatched_qty,
+            "total_volume": matched_qty + unmatched_qty,
+            "profit_count": profit_count,
+            "loss_count": loss_count,
             "matched_count": len(self.matches),
             "unmatched_count": len(self.unmatched),
             "match_ratio": len(self.matches) / total_records if total_records else None,

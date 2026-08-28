@@ -112,14 +112,29 @@ class LegacyMatcher:
                     return order[name]
             return default
 
+        event_type = str(value("e", "eventType", default=""))
+        raw_fee = float(value("n", "commission", default=0) or 0)
+        spot_N = str(value("N", default=""))
+        # Spot executionReport commissions are reported in the traded asset;
+        # convert them to quote currency with the actual fill price. Futures
+        # ORDER_TRADE_UPDATE commissions are already quoted in USDT/USDC.
+        if event_type == "executionReport" and spot_N not in ("USDT", "USDC", ""):
+            fill_price = float(value("L", "lastExecutedPrice", "ap", "avgPrice", "p", "price", default=0) or 0)
+            fee = raw_fee * fill_price
+        else:
+            fee = raw_fee
+
         return MatchOrder(
             id=str(value("c", "clientOrderId", default="")),
             system_id=str(value("i", "orderId", default="")),
             side=str(value("S", "side", default="")),
             status=str(value("X", "x", "status", default="")),
-            price=float(value("ap", "avgPrice", "p", "price", default=0) or 0),
+            # For a completed fill, prefer the accumulated average execution
+            # price; Spot executionReport commonly exposes only ``L`` (last
+            # executed price), while ``p`` is merely the submitted limit price.
+            price=float(value("ap", "avgPrice", "L", "lastExecutedPrice", "p", "price", default=0) or 0),
             quantity=float(value("z", "executedQty", "q", "quantity", default=0) or 0),
-            fee=float(value("n", "commission", default=0) or 0),
+            fee=fee,
             time_ms=int(value("E", "T", "time", default=int(time.time() * 1000)) or 0),
             fill_time=int(value("T", "transactTime", default=0) or 0),
             symbol=str(value("s", "symbol", default="") or "").upper(),
@@ -160,7 +175,13 @@ class LegacyMatcher:
             return self.process_completed(current, extra_fee=extra_fee + accumulated)
 
     def process_completed(self, current: MatchOrder, *, extra_fee: float = 0.0) -> list[MatchRecord]:
-        """Apply the old FILLED/PARTIALLY_CANCELED matching branch."""
+        """Match an incoming (later) order against queued (earlier) match orders.
+
+        Naming follows the report contract: the queued order is the *matching
+        order* (``current_*`` fields), while the incoming order is the
+        *matched order* (``match_*`` fields).  The local ``current`` argument
+        is retained for API compatibility and means the incoming event only.
+        """
         output: list[MatchRecord] = []
         with self._lock:
             order_qty = current.quantity
@@ -168,35 +189,34 @@ class LegacyMatcher:
             consumed_previous = False
             index = 0
             while index < len(self.match_orders):
-                old = self.match_orders[index]
-                if not is_matching_order(current.id, current.system_id, old.system_id, old.id):
+                queued_order = self.match_orders[index]
+                if not is_matching_order(current.id, current.system_id, queued_order.system_id, queued_order.id):
                     index += 1
                     continue
-                old_fee = 0.0 if old.flage == 1 else old.fee
+                old_fee = 0.0 if queued_order.flage == 1 else queued_order.fee
                 current_fee = 0.0 if consumed_previous else current.fee
-                min_qty = min(order_qty, old.quantity)
-                if current.side == "BUY":
-                    profit = old.price * min_qty - current.price * min_qty - current_fee - old_fee - extra_fee
-                else:
-                    profit = current.price * min_qty - old.price * min_qty - current_fee - old_fee - extra_fee
-                offset = (old.price - current.price) / old.price if old.price else 0.0
+                min_qty = min(order_qty, queued_order.quantity)
+                sell_price = queued_order.price if queued_order.side == "SELL" else current.price
+                buy_price = queued_order.price if queued_order.side == "BUY" else current.price
+                profit = (sell_price - buy_price) * min_qty - current_fee - old_fee - extra_fee
+                offset = (sell_price - buy_price) / buy_price if buy_price else 0.0
                 record = MatchRecord(
-                    current_id=current.id,
-                    current_system_id=current.system_id,
-                    current_side=current.side,
-                    match_id=old.id,
-                    match_system_id=old.system_id,
-                    match_side=old.side,
+                    current_id=queued_order.id,
+                    current_system_id=queued_order.system_id,
+                    current_side=queued_order.side,
+                    match_id=current.id,
+                    match_system_id=current.system_id,
+                    match_side=current.side,
                     quantity=min_qty,
-                    current_price=current.price,
-                    match_price=old.price,
-                    current_fee=current_fee + extra_fee,
-                    match_fee=old_fee,
+                    current_price=queued_order.price,
+                    match_price=current.price,
+                    current_fee=old_fee,
+                    match_fee=current_fee + extra_fee,
                     profit=profit,
                     offset=offset,
                     event_time_ms=current.time_ms,
-                    current_symbol=current.symbol,
-                    match_symbol=old.symbol,
+                    current_symbol=queued_order.symbol,
+                    match_symbol=current.symbol,
                 )
                 output.append(record)
                 self.records.append(record)
@@ -206,15 +226,15 @@ class LegacyMatcher:
                 if self.on_match:
                     self.on_match(record)
 
-                if old.quantity > order_qty - 1e-8:
-                    if abs(order_qty - old.quantity) < 1e-8:
+                if queued_order.quantity > order_qty - 1e-8:
+                    if abs(order_qty - queued_order.quantity) < 1e-8:
                         self.match_orders.pop(index)
                     else:
-                        old.quantity -= order_qty
-                        old.flage = 1
+                        queued_order.quantity -= order_qty
+                        queued_order.flage = 1
                     flag = True
                     break
-                order_qty -= old.quantity
+                order_qty -= queued_order.quantity
                 consumed_previous = True
                 self.match_orders.pop(index)
 

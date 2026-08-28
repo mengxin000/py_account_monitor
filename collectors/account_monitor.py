@@ -208,6 +208,20 @@ class BinanceAccountMonitor:
             LOGGER.exception("failed to load 09:30 equity baseline account=%s", self.config.account_id)
 
     async def _on_user_event(self, event: dict[str, Any]) -> None:
+        # UM user streams emit ACCOUNT_UPDATE with reason FUNDING_FEE when a
+        # funding settlement changes the account.  Keep the raw callback for
+        # audit/replay; the authoritative amount is still collected by the
+        # scheduled income REST query below.
+        if str(event.get("e", "")) == "ACCOUNT_UPDATE":
+            account_update = event.get("a")
+            if isinstance(account_update, Mapping) and str(account_update.get("m", "")) == "FUNDING_FEE":
+                self.store.append("funding.jsonl", {
+                    "recordType": "funding_callback",
+                    "accountId": self.config.account_id,
+                    "receivedTime": datetime.now().isoformat(timespec="milliseconds"),
+                    "data": event,
+                })
+                LOGGER.info("funding callback received account=%s", self.config.account_id)
         if _is_fill_callback(event):
             self._last_trade_at = datetime.now()
             path = self.store.append_trade_event(event)
@@ -298,11 +312,15 @@ class BinanceAccountMonitor:
                 pass
             try:
                 start = datetime.strptime(trading_day() + " 09:30", "%Y%m%d %H:%M")
+                start_ms = int(start.timestamp() * 1000)
+                end_ms = int(datetime.now().timestamp() * 1000)
                 result = await self.rest.get(self.config.funding_income_path, params={
                     "incomeType": "FUNDING_FEE",
-                    "startTime": int(start.timestamp() * 1000),
+                    "startTime": start_ms,
+                    "endTime": end_ms,
                     "limit": 1000,
                 }, signed=True)
+                LOGGER.debug("funding income queried account=%s start=%s end=%s", self.config.account_id, start.isoformat(), datetime.now().isoformat())
                 rows = result if isinstance(result, list) else result.get("data", result.get("rows", []))
                 if isinstance(rows, list):
                     for row in rows:

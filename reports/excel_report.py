@@ -121,8 +121,6 @@ def _pct_parts(summary: dict[str, Any]) -> tuple[float, float, float]:
 
 def _write_profit_block(ws: Any, data: ReportData) -> None:
     summary = data.profit_summary
-    positions = _position_rows(summary)
-    trade_pct, fee_pct, vibration_pct = _pct_parts(summary)
     matched = int(summary["matched_count"])
     unmatched = int(summary["unmatched_count"])
     total = matched + unmatched
@@ -150,60 +148,54 @@ def _write_profit_block(ws: Any, data: ReportData) -> None:
             ws.cell(account_row, col + 1).number_format = "0.0000000000"
 
     metric_header = start + 3
-    headers = ["实际损益", "理论损益", "损益差值", "交易损益", "费率损益", "波动损益"]
-    values = [summary["actual_profit"], summary["theoretical_profit"], summary["profit_difference"], summary["trade_profit"], summary["fee_profit"], summary["volatility_profit"]]
-    for col, (header, value) in enumerate(zip(headers, values), 1):
+    metrics = [
+        ("实际损益", summary["actual_profit"], "0.0000000000"),
+        ("交易损益", summary["trade_profit"], "0.0000000000"),
+        ("费率损益", summary["fee_profit"], "0.0000000000"),
+        ("24h总成交量", summary["total_volume"], "0.0000000000"),
+    ]
+    stats = [
+        ("总成交条数", int(summary["fill_count"]), "0"),
+        ("配对条数", matched, "0"),
+        ("未配对条数", unmatched, "0"),
+        ("盈利条数", int(summary["profit_count"]), "0"),
+        ("亏损条数", int(summary["loss_count"]), "0"),
+    ]
+    for col, (header, value, fmt) in enumerate(metrics, 1):
         ws.cell(metric_header, col, header)
         ws.cell(metric_header + 1, col, value)
         _style(ws.cell(metric_header, col), HEADER_FILL, bold=True, white_font=True)
         _style(ws.cell(metric_header + 1, col))
-        ws.cell(metric_header + 1, col).number_format = "0.0000000000"
-    ws.cell(metric_header + 2, 1, "占比(%)")
-    _style(ws.cell(metric_header + 2, 1), SECTION_FILL, bold=True)
-    for col, value in enumerate(("", "", "", trade_pct, fee_pct, vibration_pct), 1):
-        ws.cell(metric_header + 2, col, value)
-        _style(ws.cell(metric_header + 2, col))
-        if isinstance(value, (int, float)):
-            ws.cell(metric_header + 2, col).number_format = "0.0000000000"
+        ws.cell(metric_header + 1, col).number_format = fmt
 
-    position_header = metric_header + 4
-    ws.merge_cells(start_row=position_header, start_column=1, end_row=position_header, end_column=6)
-    section = ws.cell(position_header, 1, "交易对持仓波动")
-    _style(section, HEADER_FILL, bold=True, white_font=True)
-    position_titles = ["交易对", "09:30数量", "当前数量", "09:30标记价", "当前标记价", "波动损益"]
-    for col, value in enumerate(position_titles, 1):
-        ws.cell(position_header + 1, col, value)
-        _style(ws.cell(position_header + 1, col), SECTION_FILL, bold=True)
-    if positions:
-        for row_index, item in enumerate(positions, position_header + 2):
-            values = [item["symbol"], item["baseline_quantity"], item["current_quantity"], item["baseline_mark_price"], item["current_mark_price"], item["profit"]]
+    stats_header = metric_header + 3
+    for col, (header, value, fmt) in enumerate(stats, 1):
+        ws.cell(stats_header, col, header)
+        ws.cell(stats_header + 1, col, value)
+        _style(ws.cell(stats_header, col), HEADER_FILL, bold=True, white_font=True)
+        _style(ws.cell(stats_header + 1, col))
+        ws.cell(stats_header + 1, col).number_format = fmt
+
+    # Keep the per-symbol trading summary visible in the workbook.  This is
+    # independent of the removed HK/US and market-order statistics.
+    summary_header = stats_header + 4
+    symbol_titles = ["交易对", "成交事件", "配对次数", "配对数量", "配对收益", "未配对数量"]
+    for col, title_text in enumerate(symbol_titles, 1):
+        ws.cell(summary_header, col, title_text)
+        _style(ws.cell(summary_header, col), HEADER_FILL, bold=True, white_font=True)
+    symbol_rows = data.symbol_summary()
+    if symbol_rows:
+        for row_index, item in enumerate(symbol_rows, summary_header + 1):
+            values = [item["symbol"], int(item["fill_count"]), int(item["match_count"]), item["matched_quantity"], item["profit"], item["unmatched_quantity"]]
             for col, value in enumerate(values, 1):
                 ws.cell(row_index, col, value)
                 _style(ws.cell(row_index, col))
-                if col > 1:
+                if col >= 4:
                     ws.cell(row_index, col).number_format = "0.0000000000"
     else:
-        ws.cell(position_header + 2, 1, "无持仓")
-        ws.merge_cells(start_row=position_header + 2, start_column=1, end_row=position_header + 2, end_column=6)
-        _style(ws.cell(position_header + 2, 1))
-
-    stats_header = position_header + 3 + max(len(positions), 1)
-    ws.merge_cells(start_row=stats_header, start_column=1, end_row=stats_header, end_column=6)
-    stats_title = ws.cell(stats_header, 1, "成交配对统计")
-    _style(stats_title, HEADER_FILL, bold=True, white_font=True)
-    stats = [
-        ("成交事件数", summary["fill_count"]), ("配对条数", matched), ("未配对条数", unmatched),
-        ("配对比例(%)", match_ratio),
-        ("已配对数量", summary["matched_quantity"]), ("未配对数量", summary["unmatched_quantity"]),
-    ]
-    for index, (label, value) in enumerate(stats):
-        row = stats_header + 1 + index // 3
-        col = 1 + (index % 3) * 2
-        ws.cell(row, col, label)
-        ws.cell(row, col + 1, value)
-        _style(ws.cell(row, col), SECTION_FILL, bold=True)
-        _style(ws.cell(row, col + 1))
-        ws.cell(row, col + 1).number_format = "0.000000" if isinstance(value, (int, float)) else "General"
+        ws.cell(summary_header + 1, 1, "暂无成交记录")
+        ws.merge_cells(start_row=summary_header + 1, start_column=1, end_row=summary_header + 1, end_column=len(symbol_titles))
+        _style(ws.cell(summary_header + 1, 1))
 
     for col, width in enumerate([22, 18, 18, 18, 18, 18, 18, 18], 1):
         ws.column_dimensions[get_column_letter(col)].width = width

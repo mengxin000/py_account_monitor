@@ -227,7 +227,10 @@ class BinanceRestClient:
                 self._logger.warning("Unable to synchronize Binance server time: %s", exc)
                 # Keep running with local time; the API response will trigger
                 # one more sync attempt if it returns -1021.
-                self._time_synced = True
+                # Do not mark the clock as synchronized on failure: transient
+                # DNS/proxy/endpoint errors must be retried by the next
+                # signed request instead of permanently poisoning this client.
+                self._time_synced = False
                 return self._time_offset_ms
 
     async def get(self, path: str, *, params: Mapping[str, Any] | None = None, signed: bool = False) -> Json:
