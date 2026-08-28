@@ -35,9 +35,9 @@ UNMATCHED_FILL = PatternFill("solid", fgColor=UNMATCHED)
 ORDER_HEADERS = [
     "订单ID", "订单系统ID", "订单方向", "订单成交数量", "订单平均成交价格", "订单手续费",
     "对冲订单ID", "对冲订单系统ID", "对冲订单方向", "对冲订单成交数量", "对冲订单平均成交价格",
-    "对冲订单手续费", "收益", "成交价差", "记录时间", "成交时间",
+    "对冲订单手续费", "收益", "成交价差", "成交时间",
 ]
-ORDER_WIDTHS = [23, 16, 11, 15, 18, 14, 23, 23, 11, 17, 21, 15, 16, 14, 23, 23]
+ORDER_WIDTHS = [23, 16, 11, 15, 18, 14, 23, 23, 11, 17, 21, 15, 16, 14, 23]
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -76,7 +76,7 @@ def _order_row(row: dict[str, Any]) -> list[Any]:
         _float(row.get("current_price")), _float(row.get("current_fee")),
         row.get("match_id", ""), row.get("match_system_id", ""), row.get("match_side", ""), quantity,
         _float(row.get("match_price")), _float(row.get("match_fee")), _float(row.get("profit")),
-        _float(row.get("offset")), _time_text(row.get("record_time_ms")), _time_text(row.get("event_time_ms")),
+        _float(row.get("offset")), _time_text(row.get("event_time_ms")),
     ]
 
 
@@ -84,7 +84,7 @@ def _unmatched_row(row: dict[str, Any]) -> list[Any]:
     return [
         row.get("id", ""), row.get("system_id", ""), row.get("side", ""), _float(row.get("quantity")),
         _float(row.get("price")), _float(row.get("fee")), "", "", "", "", "", "", "", "",
-        _time_text(row.get("record_time_ms")), _time_text(row.get("event_time_ms")),
+        _time_text(row.get("event_time_ms")),
     ]
 
 

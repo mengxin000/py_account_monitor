@@ -1,7 +1,7 @@
 {
   "address": "smtp://smtp.example.com:587",
   "user": "monitor@example.com",
-  "pass": "smtp-app-password",
+  "pass": "covmvwoxfusobfig",
   "sender": "monitor@example.com",
   "recipients": ["trader@example.com"],
   "cc": [],

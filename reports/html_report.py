@@ -7,8 +7,10 @@ from .report_data import ReportData
 
 
 def _number(value: object) -> str:
-    if isinstance(value, (int, float)):
+    if isinstance(value, float):
         return f"{value:.10f}"
+    if isinstance(value, int ):
+        return str(value)
     return html.escape(str(value))
 
 

@@ -45,6 +45,7 @@ class MatchOrder:
     time_ms: int = field(default_factory=lambda: int(time.time() * 1000))
     fill_time: int = 0
     symbol: str = ""
+    market_type: str = ""  # spot (executionReport) or futures (ORDER_TRADE_UPDATE)
 
 
 @dataclass(frozen=True)
@@ -106,13 +107,13 @@ class LegacyMatcher:
     def from_order_event(event: Mapping[str, Any]) -> MatchOrder:
         """Build a MatchOrder from Binance PM/Futures or Spot order payload."""
         order = event.get("o") if isinstance(event.get("o"), Mapping) else event
+        event_type = str(event.get("e", event.get("eventType", "")))
         def value(*names: str, default: Any = "") -> Any:
             for name in names:
                 if name in order and order[name] is not None:
                     return order[name]
             return default
 
-        event_type = str(value("e", "eventType", default=""))
         raw_fee = float(value("n", "commission", default=0) or 0)
         spot_N = str(value("N", default=""))
         # Spot executionReport commissions are reported in the traded asset;
@@ -138,6 +139,7 @@ class LegacyMatcher:
             time_ms=int(value("E", "T", "time", default=int(time.time() * 1000)) or 0),
             fill_time=int(value("T", "transactTime", default=0) or 0),
             symbol=str(value("s", "symbol", default="") or "").upper(),
+            market_type="spot" if event_type.lower() == "executionreport" else ("futures" if event_type.upper() == "ORDER_TRADE_UPDATE" else ""),
         )
 
     def enqueue(self, order: MatchOrder) -> None:
@@ -199,7 +201,14 @@ class LegacyMatcher:
                 sell_price = queued_order.price if queued_order.side == "SELL" else current.price
                 buy_price = queued_order.price if queued_order.side == "BUY" else current.price
                 profit = (sell_price - buy_price) * min_qty - current_fee - old_fee - extra_fee
-                offset = (sell_price - buy_price) / buy_price if buy_price else 0.0
+                # Cross-market spread ratio: futures price is the denominator.  current->hedge
+                if queued_order.market_type == "futures" and current.market_type == "spot":
+                    futures_price, spot_price = queued_order.price, current.price
+                elif queued_order.market_type == "spot" and current.market_type == "futures":
+                    futures_price, spot_price = current.price, queued_order.price
+                else:
+                    futures_price, spot_price = sell_price, buy_price
+                offset = (futures_price - spot_price) / futures_price if futures_price else 0.0
                 record = MatchRecord(
                     current_id=queued_order.id,
                     current_system_id=queued_order.system_id,

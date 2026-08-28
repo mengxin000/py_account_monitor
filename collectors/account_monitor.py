@@ -180,6 +180,10 @@ class BinanceAccountMonitor:
         self._baseline_at: datetime | None = None
         self._baseline_positions: Any = []
         self._last_funding_at: datetime | None = None
+        # Funding REST results are queried repeatedly (and after restarts), so
+        # keep the Binance transaction IDs in memory for de-duplication.
+        self._funding_seen: set[str] = set()
+        self._load_funding_seen()
         self._positions_warned = False
         self._funding_warned = False
         self._load_baseline()
@@ -206,6 +210,20 @@ class BinanceAccountMonitor:
                 self._baseline_positions = row.get("baselinePositions", [])
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             LOGGER.exception("failed to load 09:30 equity baseline account=%s", self.config.account_id)
+
+    def _load_funding_seen(self) -> None:
+        path = self.store._path("funding.jsonl")
+        if not path.exists():
+            return
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                row = json.loads(line)
+                data = row.get("data", row)
+                if row.get("recordType") == "funding_income" and isinstance(data, Mapping):
+                    key = str(data.get("tranId") or data.get("id") or f"{data.get('time')}:{data.get('symbol')}:{data.get('income')}")
+                    self._funding_seen.add(key)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            LOGGER.warning("failed to load funding de-duplication state account=%s", self.config.account_id, exc_info=True)
 
     async def _on_user_event(self, event: dict[str, Any]) -> None:
         # UM user streams emit ACCOUNT_UPDATE with reason FUNDING_FEE when a
