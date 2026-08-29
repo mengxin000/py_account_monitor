@@ -21,6 +21,7 @@ import re
 import signal
 import threading
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -129,9 +130,29 @@ class JsonlEventStore:
 
     def write_equity_state(self, state: Mapping[str, Any], *, now: datetime | None = None) -> Path:
         path = self._path("equity.json", now)
-        temp = path.with_suffix(".json.tmp")
-        temp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp.replace(path)
+        # Reports can briefly have equity.json open while the five-second REST
+        # loop replaces it. Windows then raises WinError 5 for os.replace().
+        # A unique temporary file also prevents collisions if two processes
+        # overlap during a restart. Keep the old complete state until replace
+        # succeeds, and retry only this short-lived sharing violation.
+        temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        payload = json.dumps(state, ensure_ascii=False, indent=2)
+        with self._lock:
+            try:
+                temp.write_text(payload, encoding="utf-8")
+                for attempt, delay in enumerate((0.02, 0.05, 0.10, 0.20, 0.40), 1):
+                    try:
+                        os.replace(temp, path)
+                        return path
+                    except PermissionError:
+                        if attempt == 5:
+                            raise
+                        time.sleep(delay)
+            finally:
+                try:
+                    temp.unlink(missing_ok=True)
+                except OSError:
+                    pass
         return path
 
     def append_trade_event(self, event: Mapping[str, Any]) -> Path | None:

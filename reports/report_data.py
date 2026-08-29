@@ -25,7 +25,9 @@ class ReportData:
     unmatched: list[dict[str, Any]]
     snapshots: list[dict[str, Any]]
     fill_counts: dict[str, int]
+    fill_volumes: dict[str, float]
     exposure_matches: list[dict[str, Any]]
+    exposure_remain: list[dict[str, Any]]
     funding: list[dict[str, Any]]
     baseline_equity: float | None = None
     baseline_time: str | None = None
@@ -50,7 +52,9 @@ class ReportData:
             except (TypeError, ValueError):
                 current_equity = None
         actual = (current_equity - self.baseline_equity) if current_equity is not None and self.baseline_equity is not None else None
-        trade_profit = sum(float(row.get("profit", 0) or 0) for row in self.matches)
+        direct_profit = sum(float(row.get("profit", 0) or 0) for row in self.matches)
+        exposure_profit = sum(float(row.get("profit_delta", 0) or 0) for row in self.exposure_matches)
+        trade_profit = direct_profit + exposure_profit
         funding_profit = 0.0
         for row in self.funding:
             value = row.get("data", row)
@@ -69,8 +73,10 @@ class ReportData:
         if actual is None:
             actual = theoretical
         matched_qty = sum(float(row.get("quantity", 0) or 0) for row in self.matches)
-        unmatched_qty = sum(float(row.get("quantity", 0) or 0) for row in self.unmatched)
+        unmatched_qty = sum(float(row.get("quantity", 0) or 0) for row in self.exposure_remain)
         total_records = len(self.matches) + len(self.unmatched)
+        # Pair counts describe ordinary ID-based pairs only. Exposure matching
+        # affects trading P&L, but it is not represented as an Excel pair.
         profit_count = sum(1 for row in self.matches if float(row.get("profit", 0) or 0) > 0)
         loss_count = sum(1 for row in self.matches if float(row.get("profit", 0) or 0) < 0)
         return {
@@ -85,10 +91,14 @@ class ReportData:
             "vibration_breakdown": self.vibration_breakdown(),
             "matched_quantity": matched_qty,
             "unmatched_quantity": unmatched_qty,
-            "total_volume": matched_qty + unmatched_qty,
+            "exposure_quantity": sum(float(row.get("quantity", 0) or 0) for row in self.exposure_matches),
+            "exposure_profit": exposure_profit,
+            "exposure_residual_quantity": unmatched_qty,
+            "total_volume": sum(self.fill_volumes.values()),
             "profit_count": profit_count,
             "loss_count": loss_count,
             "matched_count": len(self.matches),
+            "exposure_count": len(self.exposure_matches),
             "unmatched_count": len(self.unmatched),
             "match_ratio": len(self.matches) / total_records if total_records else None,
             "fill_count": sum(self.fill_counts.values()),
@@ -146,31 +156,65 @@ class ReportData:
 
     def symbol_summary(self) -> list[dict[str, Any]]:
         summary: dict[str, dict[str, Any]] = defaultdict(lambda: {
-            "symbol": "", "fill_count": 0, "match_count": 0, "matched_quantity": 0.0,
-            "profit": 0.0, "fees": 0.0, "unmatched_quantity": 0.0,
+            "symbol": "", "fill_count": 0, "volume": 0.0, "match_count": 0,
+            "profit_count": 0, "loss_count": 0, "unmatched_count": 0,
+            "matched_quantity": 0.0, "profit": 0.0, "fees": 0.0, "unmatched_quantity": 0.0,
+            "exposure_quantity": 0.0, "exposure_profit": 0.0,
         })
         for symbol, count in self.fill_counts.items():
-            summary[symbol].update(symbol=symbol, fill_count=count)
+            summary[symbol].update(
+                symbol=symbol,
+                fill_count=count,
+                volume=self.fill_volumes.get(symbol, 0.0),
+            )
         for row in self.matches:
             symbol = str(row.get("current_symbol") or row.get("match_symbol") or "UNKNOWN")
             item = summary[symbol]
             item["symbol"] = symbol
             item["match_count"] += 1
             item["matched_quantity"] += float(row.get("quantity", 0) or 0)
-            item["profit"] += float(row.get("profit", 0) or 0)
+            profit = float(row.get("profit", 0) or 0)
+            item["profit"] += profit
+            item["profit_count"] += int(profit > 0)
+            item["loss_count"] += int(profit < 0)
             item["fees"] += float(row.get("current_fee", 0) or 0) + float(row.get("match_fee", 0) or 0)
         for row in self.unmatched:
             symbol = str(row.get("symbol", "UNKNOWN"))
+            summary[symbol]["symbol"] = symbol
+            summary[symbol]["unmatched_count"] += 1
+        for row in self.exposure_remain:
+            symbol = str(row.get("symbol", "UNKNOWN"))
             summary[symbol]["unmatched_quantity"] += float(row.get("quantity", 0) or 0)
+        for row in self.exposure_matches:
+            symbol = str(row.get("symbol", "UNKNOWN"))
+            summary[symbol]["symbol"] = symbol
+            summary[symbol]["exposure_quantity"] += float(row.get("quantity", 0) or 0)
+            summary[symbol]["exposure_profit"] += float(row.get("profit_delta", 0) or 0)
         return sorted(summary.values(), key=lambda x: x["symbol"])
 
 
 def load_report_data(day_dir: Path, account_id: str) -> ReportData:
     fill_counts: dict[str, int] = {}
+    fill_volumes: dict[str, float] = {}
     for path in sorted(day_dir.glob("*.jsonl")):
-        if path.name in {"account_info.jsonl", "matches.jsonl", "unmatched.jsonl", "exposure_matches.jsonl", "funding.jsonl"}:
+        if path.name in {"account_info.jsonl", "matches.jsonl", "unmatched.jsonl", "exposure_matches.jsonl", "exposure_remain.jsonl", "funding.jsonl"}:
             continue
-        fill_counts[path.stem] = len(read_jsonl(path))
+        events = read_jsonl(path)
+        fill_counts[path.stem] = len(events)
+        volume = 0.0
+        for event in events:
+            data = event.get("data", event)
+            nested_order = data.get("o") if isinstance(data, dict) else None
+            order = nested_order if isinstance(nested_order, dict) else data
+            try:
+                # Each JSONL row is one fill callback. Use last-filled quantity
+                # and last-filled price so partial fills are not counted twice.
+                quantity = float(order.get("l", order.get("lastExecutedQty", 0)) or 0)
+                price = float(order.get("L", order.get("lastExecutedPrice", 0)) or 0)
+                volume += quantity * price
+            except (AttributeError, TypeError, ValueError):
+                continue
+        fill_volumes[path.stem] = volume
     snapshots = [row for row in read_jsonl(day_dir / "account_info.jsonl") if row.get("recordType") == "account_snapshot"]
     resets = [row for row in read_jsonl(day_dir / "account_info.jsonl") if row.get("recordType") == "equity_reset"]
     baseline = resets[-1] if resets else {}
@@ -192,7 +236,9 @@ def load_report_data(day_dir: Path, account_id: str) -> ReportData:
         unmatched=read_jsonl(day_dir / "unmatched.jsonl"),
         snapshots=snapshots,
         fill_counts=fill_counts,
+        fill_volumes=fill_volumes,
         exposure_matches=read_jsonl(day_dir / "exposure_matches.jsonl"),
+        exposure_remain=read_jsonl(day_dir / "exposure_remain.jsonl"),
         funding=read_jsonl(day_dir / "funding.jsonl"),
         baseline_equity=(float(state["baselineEquity"]) if state.get("baselineEquity") is not None else baseline_equity),
         baseline_time=state.get("baselineTime") or baseline.get("resetTime"),

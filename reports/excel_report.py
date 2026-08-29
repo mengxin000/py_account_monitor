@@ -84,7 +84,7 @@ def _unmatched_row(row: dict[str, Any]) -> list[Any]:
     return [
         row.get("id", ""), row.get("system_id", ""), row.get("side", ""), _float(row.get("quantity")),
         _float(row.get("price")), _float(row.get("fee")), "", "", "", "", "", "", "", "",
-        _time_text(row.get("event_time_ms")),
+        _time_text(row.get("time_ms")),
     ]
 
 
@@ -99,14 +99,21 @@ def _write_orders(ws: Any, data: ReportData) -> None:
         ws.column_dimensions[get_column_letter(col)].width = width
     ws.row_dimensions[1].height = 34
 
-    for records, kind in ((data.matches, "match"), (data.unmatched, "unmatched")):
-        for record in records:
-            ws.append(_order_row(record) if kind == "match" else _unmatched_row(record))
-            fill = UNMATCHED_FILL if kind == "unmatched" else (LOSS_FILL if _float(record.get("profit")) < 0 else MATCH_FILL)
-            for cell in ws[ws.max_row]:
-                _style(cell, fill)
-            for col in (*range(4, 7), *range(10, 15)):
-                ws.cell(ws.max_row, col).number_format = "0.000000"
+    rows: list[tuple[dict[str, Any], str]] = [
+        *((record, "match") for record in data.matches),
+        *((record, "unmatched") for record in data.unmatched),
+    ]
+    rows.sort(key=lambda item: (
+        str(item[0].get("current_symbol") or item[0].get("match_symbol") or item[0].get("symbol") or "").upper(),
+        _float(item[0].get("event_time_ms", item[0].get("time_ms", 0))),
+    ))
+    for record, kind in rows:
+        ws.append(_order_row(record) if kind == "match" else _unmatched_row(record))
+        fill = UNMATCHED_FILL if kind == "unmatched" else (LOSS_FILL if _float(record.get("profit")) < 0 else MATCH_FILL)
+        for cell in ws[ws.max_row]:
+            _style(cell, fill)
+        for col in (*range(4, 7), *range(10, 15)):
+            ws.cell(ws.max_row, col).number_format = "0.000000"
 
 
 def _position_rows(summary: dict[str, Any]) -> list[dict[str, Any]]:
@@ -179,14 +186,14 @@ def _write_profit_block(ws: Any, data: ReportData) -> None:
     # Keep the per-symbol trading summary visible in the workbook.  This is
     # independent of the removed HK/US and market-order statistics.
     summary_header = stats_header + 4
-    symbol_titles = ["交易对", "成交事件", "配对次数", "配对数量", "配对收益", "未配对数量"]
+    symbol_titles = ["交易对", "成交事件", "配对次数", "配对数量", "配对收益", "Exposure匹配数量", "Exposure匹配收益", "Exposure剩余数量"]
     for col, title_text in enumerate(symbol_titles, 1):
         ws.cell(summary_header, col, title_text)
         _style(ws.cell(summary_header, col), HEADER_FILL, bold=True, white_font=True)
     symbol_rows = data.symbol_summary()
     if symbol_rows:
         for row_index, item in enumerate(symbol_rows, summary_header + 1):
-            values = [item["symbol"], int(item["fill_count"]), int(item["match_count"]), item["matched_quantity"], item["profit"], item["unmatched_quantity"]]
+            values = [item["symbol"], int(item["fill_count"]), int(item["match_count"]), item["matched_quantity"], item["profit"], item["exposure_quantity"], item["exposure_profit"], item["unmatched_quantity"]]
             for col, value in enumerate(values, 1):
                 ws.cell(row_index, col, value)
                 _style(ws.cell(row_index, col))

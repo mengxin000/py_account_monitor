@@ -78,6 +78,7 @@ class ExposureMatch:
     buy_fee: float
     sell_fee: float
     profit_delta: float
+    symbol: str = ""
 
 
 class LegacyMatcher:
@@ -291,6 +292,7 @@ class LegacyMatcher:
         with self._lock:
             if not self.buy_not_match_orders or not self.sell_not_match_orders:
                 return result
+            exposure_symbol = self.buy_not_match_orders[0].symbol or self.sell_not_match_orders[0].symbol
             buy_total = sum(o.quantity for o in self.buy_not_match_orders)
             sell_total = sum(o.quantity for o in self.sell_not_match_orders)
             remain_buy = min(buy_total, sell_total)
@@ -326,7 +328,7 @@ class LegacyMatcher:
             if abs(delta) < 2:
                 self.deal_profit += delta
             self.exposure_records.append(
-                ExposureMatch("", "", min(buy_total, sell_total), buy_sum, sell_sum, buy_fee, sell_fee, delta)
+                ExposureMatch("", "", min(buy_total, sell_total), buy_sum, sell_sum, buy_fee, sell_fee, delta, exposure_symbol)
             )
             result.extend(self.exposure_records[-1:])
         return result
