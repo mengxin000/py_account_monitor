@@ -145,12 +145,51 @@ async def _report_loop(monitors: list[BinanceAccountMonitor], email_path: Path |
         await asyncio.sleep(max(30.0, interval))
 
 
+async def _final_day_report_loop(monitors: list[BinanceAccountMonitor], email_path: Path | None, base: Path) -> None:
+    """Send the previous trading-day final report at each 09:30 boundary.
+
+    This is intentionally independent from the regular half-hour loop.  A
+    coincident regular report therefore remains a separate email.
+    """
+    while True:
+        now = datetime.now()
+        target = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        await asyncio.sleep(max(0.0, (target - now).total_seconds()))
+        day = (target - timedelta(days=1)).strftime("%Y%m%d")
+        attachments: list[Path] = []
+        html_parts: list[str] = [f"<h2>Binance账户监控报告 {day}</h2>"]
+        for monitor in monitors:
+            try:
+                day_dir = monitor.store.root / day
+                if not day_dir.exists():
+                    continue
+                replay_day(day_dir)
+                data = load_report_data(day_dir, monitor.config.account_id)
+                output_dir = base / "output" / monitor.config.account_id / day
+                xlsx = build_workbook(data, output_dir / f"{monitor.config.account_id}_{day}.xlsx")
+                html_path = build_html(data, output_dir / f"{monitor.config.account_id}_{day}.html")
+                attachments.append(xlsx)
+                html_parts.append(html_path.read_text(encoding="utf-8"))
+            except Exception:
+                LOGGER.exception("final report failed for account %s", monitor.config.account_id)
+        if email_path and email_path.exists() and attachments:
+            try:
+                settings = load_email_settings(email_path)
+                await asyncio.to_thread(send_reports, settings, f"{settings.subject_prefix}_{day}_final", "\n".join(html_parts), attachments)
+                LOGGER.info("final email sent successfully day=%s attachments=%d", day, len(attachments))
+            except Exception:
+                LOGGER.exception("final email report failed day=%s attachments=%d", day, len(attachments))
+
+
 async def run(service_path: Path) -> None:
     account_files, email_path, interval, first_delay = _load_service(service_path)
     monitors = [BinanceAccountMonitor(load_config(path)) for path in account_files]
     report_state: dict[str, datetime | None] = {"last_report": None, "next_report": None}
     tasks = [asyncio.create_task(monitor.run()) for monitor in monitors]
     tasks.append(asyncio.create_task(_report_loop(monitors, email_path, interval, first_delay, service_path.parent.parent, report_state)))
+    tasks.append(asyncio.create_task(_final_day_report_loop(monitors, email_path, service_path.parent.parent)))
     tasks.append(asyncio.create_task(_dashboard(monitors, report_state)))
     try:
         await asyncio.gather(*tasks)
