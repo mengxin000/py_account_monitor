@@ -178,6 +178,7 @@ class BinanceAccountMonitor:
         self._last_error: str | None = None
         self._baseline_equity: float | None = None
         self._baseline_at: datetime | None = None
+        self._baseline_day: str | None = None
         self._baseline_positions: Any = []
         self._last_funding_at: datetime | None = None
         # Funding REST results are queried repeatedly (and after restarts), so
@@ -207,6 +208,7 @@ class BinanceAccountMonitor:
             if row.get("baselineEquity") is not None:
                 self._baseline_equity = float(row["baselineEquity"])
                 self._baseline_at = datetime.fromisoformat(row["baselineTime"])
+                self._baseline_day = str(row.get("tradingDay") or trading_day(self._baseline_at))
                 self._baseline_positions = row.get("baselinePositions", [])
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             LOGGER.exception("failed to load 09:30 equity baseline account=%s", self.config.account_id)
@@ -251,11 +253,21 @@ class BinanceAccountMonitor:
         now = datetime.now()
         if (now.hour, now.minute, now.second) < (9, 30, 0):
             return
+        day = trading_day(now)
+        # A long-running process crosses the 09:30 boundary without being
+        # reconstructed, so explicitly rotate the in-memory baseline when the
+        # trading day changes.
+        if self._baseline_day != day:
+            self._baseline_equity = None
+            self._baseline_at = None
+            self._baseline_positions = []
+            self._baseline_day = day
         if equity is None or self._baseline_equity is not None:
             return
         self._baseline_equity = equity
         self._baseline_at = datetime.now()
         self._baseline_positions = account.get("positions", [])
+        self._baseline_day = day
         LOGGER.info("equity baseline initialized account=%s trading_day=%s equity=%.10f", self.config.account_id, trading_day(), equity)
 
     async def _on_stream_error(self, event: dict[str, Any]) -> None:
