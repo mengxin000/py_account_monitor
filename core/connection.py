@@ -338,14 +338,23 @@ class BinanceUserDataStream:
                 async with aiohttp.ClientSession(timeout=timeout) as session:
                     async with session.ws_connect(url, heartbeat=20) as ws:
                         self.logger.info("user WebSocket connected")
-                        async for message in ws:
-                            if stop_event.is_set():
-                                break
-                            if message.type == aiohttp.WSMsgType.TEXT:
-                                payload = json.loads(message.data)
-                                await _call_handler(self.on_message, payload)
-                            elif message.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
-                                raise BinanceConnectionError("user WebSocket closed")
+                        receiver = asyncio.create_task(self._receive_loop(ws, stop_event))
+                        try:
+                            # A keepalive failure must be treated exactly like
+                            # a socket failure. Previously this background task
+                            # could die silently while the stale socket stayed
+                            # open and stopped delivering account events.
+                            done, _ = await asyncio.wait(
+                                {receiver, keepalive},
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            for task in done:
+                                await task  # propagate keepalive/receiver error
+                            if not stop_event.is_set():
+                                raise BinanceConnectionError("user stream task stopped unexpectedly")
+                        finally:
+                            receiver.cancel()
+                            await asyncio.gather(receiver, return_exceptions=True)
             except asyncio.CancelledError:
                 # The daemon cancels this task during Ctrl+C/restart.  Close
                 # the REST client so aiohttp does not report unclosed sessions.
@@ -373,4 +382,24 @@ class BinanceUserDataStream:
             try:
                 await asyncio.wait_for(stop_event.wait(), timeout=self.config.keepalive_seconds)
             except asyncio.TimeoutError:
-                await self.rest.keepalive_listen_key(self.config, listen_key)
+                try:
+                    await self.rest.keepalive_listen_key(self.config, listen_key)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    raise BinanceConnectionError(f"listen key keepalive failed: {exc}") from exc
+
+    async def _receive_loop(self, ws: Any, stop_event: asyncio.Event) -> None:
+        async for message in ws:
+            if stop_event.is_set():
+                return
+            if message.type == aiohttp.WSMsgType.TEXT:
+                payload = json.loads(message.data)
+                event_type = str(payload.get("e", payload.get("eventType", ""))) if isinstance(payload, dict) else ""
+                if event_type.lower() == "listenkeyexpired":
+                    raise BinanceConnectionError("listen key expired")
+                await _call_handler(self.on_message, payload)
+            elif message.type in (aiohttp.WSMsgType.ERROR, aiohttp.WSMsgType.CLOSED):
+                raise BinanceConnectionError("user WebSocket closed")
+        if not stop_event.is_set():
+            raise BinanceConnectionError("user WebSocket ended")

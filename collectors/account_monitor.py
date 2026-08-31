@@ -19,6 +19,7 @@ import logging
 import os
 import re
 import signal
+import stat
 import threading
 import time
 import uuid
@@ -123,9 +124,27 @@ class JsonlEventStore:
         path = self._path(filename, now)
         line = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
         with self._lock:
-            with path.open("a", encoding="utf-8", newline="\n") as stream:
-                stream.write(line)
-                stream.flush()
+            for attempt, delay in enumerate((0.0, 0.02, 0.05, 0.10, 0.20, 0.40), 1):
+                try:
+                    with path.open("a", encoding="utf-8", newline="\n") as stream:
+                        stream.write(line)
+                        stream.flush()
+                    break
+                except PermissionError:
+                    # Runtime files copied from another computer can retain
+                    # the Windows ReadOnly attribute. These are service-owned
+                    # append-only files, so restore write access automatically.
+                    if path.exists() and not (path.stat().st_mode & stat.S_IWRITE):
+                        path.chmod(path.stat().st_mode | stat.S_IWRITE)
+                        LOGGER.warning(
+                            "read-only runtime file made writable account=%s path=%s",
+                            self.account_id,
+                            path,
+                        )
+                        continue
+                    if attempt == 6:
+                        raise
+                    time.sleep(delay)
         return path
 
     def write_equity_state(self, state: Mapping[str, Any], *, now: datetime | None = None) -> Path:
