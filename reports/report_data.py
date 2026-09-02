@@ -17,6 +17,15 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
+def base_asset(symbol: object) -> str:
+    """Return the report/matcher base for USDT and USDC quoted symbols."""
+    normalized = str(symbol or "UNKNOWN").strip().upper()
+    for quote in ("USDT", "USDC"):
+        if normalized.endswith(quote) and len(normalized) > len(quote):
+            return normalized[: -len(quote)]
+    return normalized or "UNKNOWN"
+
+
 @dataclass(slots=True)
 class ReportData:
     account_id: str
@@ -162,15 +171,14 @@ class ReportData:
             "exposure_quantity": 0.0, "exposure_profit": 0.0,
         })
         for symbol, count in self.fill_counts.items():
-            summary[symbol].update(
-                symbol=symbol,
-                fill_count=count,
-                volume=self.fill_volumes.get(symbol, 0.0),
-            )
+            base = base_asset(symbol)
+            summary[base]["symbol"] = base
+            summary[base]["fill_count"] += count
+            summary[base]["volume"] += self.fill_volumes.get(symbol, 0.0)
         for row in self.matches:
-            symbol = str(row.get("current_symbol") or row.get("match_symbol") or "UNKNOWN")
-            item = summary[symbol]
-            item["symbol"] = symbol
+            base = base_asset(row.get("current_symbol") or row.get("match_symbol"))
+            item = summary[base]
+            item["symbol"] = base
             item["match_count"] += 1
             item["matched_quantity"] += float(row.get("quantity", 0) or 0)
             profit = float(row.get("profit", 0) or 0)
@@ -179,42 +187,41 @@ class ReportData:
             item["loss_count"] += int(profit < 0)
             item["fees"] += float(row.get("current_fee", 0) or 0) + float(row.get("match_fee", 0) or 0)
         for row in self.unmatched:
-            symbol = str(row.get("symbol", "UNKNOWN"))
-            summary[symbol]["symbol"] = symbol
-            summary[symbol]["unmatched_count"] += 1
+            base = base_asset(row.get("symbol"))
+            summary[base]["symbol"] = base
+            summary[base]["unmatched_count"] += 1
         for row in self.exposure_remain:
-            symbol = str(row.get("symbol", "UNKNOWN"))
-            summary[symbol]["unmatched_quantity"] += float(row.get("quantity", 0) or 0)
+            base = base_asset(row.get("symbol"))
+            summary[base]["unmatched_quantity"] += float(row.get("quantity", 0) or 0)
         for row in self.exposure_matches:
-            symbol = str(row.get("symbol", "UNKNOWN"))
-            summary[symbol]["symbol"] = symbol
-            summary[symbol]["exposure_quantity"] += float(row.get("quantity", 0) or 0)
-            summary[symbol]["exposure_profit"] += float(row.get("profit_delta", 0) or 0)
+            base = base_asset(row.get("symbol"))
+            summary[base]["symbol"] = base
+            summary[base]["exposure_quantity"] += float(row.get("quantity", 0) or 0)
+            summary[base]["exposure_profit"] += float(row.get("profit_delta", 0) or 0)
         return sorted(summary.values(), key=lambda x: x["symbol"])
 
 
 def load_report_data(day_dir: Path, account_id: str) -> ReportData:
-    fill_counts: dict[str, int] = {}
-    fill_volumes: dict[str, float] = {}
+    fill_counts: dict[str, int] = defaultdict(int)
+    fill_volumes: dict[str, float] = defaultdict(float)
     for path in sorted(day_dir.glob("*.jsonl")):
         if path.name in {"account_info.jsonl", "matches.jsonl", "unmatched.jsonl", "exposure_matches.jsonl", "exposure_remain.jsonl", "funding.jsonl"}:
             continue
         events = read_jsonl(path)
-        fill_counts[path.stem] = len(events)
-        volume = 0.0
         for event in events:
             data = event.get("data", event)
             nested_order = data.get("o") if isinstance(data, dict) else None
             order = nested_order if isinstance(nested_order, dict) else data
+            symbol = str(order.get("s", order.get("symbol", event.get("symbol", path.stem))) or path.stem).upper()
+            fill_counts[symbol] += 1
             try:
                 # Each JSONL row is one fill callback. Use last-filled quantity
                 # and last-filled price so partial fills are not counted twice.
                 quantity = float(order.get("l", order.get("lastExecutedQty", 0)) or 0)
                 price = float(order.get("L", order.get("lastExecutedPrice", 0)) or 0)
-                volume += quantity * price
+                fill_volumes[symbol] += quantity * price
             except (AttributeError, TypeError, ValueError):
                 continue
-        fill_volumes[path.stem] = volume
     snapshots = [row for row in read_jsonl(day_dir / "account_info.jsonl") if row.get("recordType") == "account_snapshot"]
     resets = [row for row in read_jsonl(day_dir / "account_info.jsonl") if row.get("recordType") == "equity_reset"]
     baseline = resets[-1] if resets else {}
@@ -232,11 +239,15 @@ def load_report_data(day_dir: Path, account_id: str) -> ReportData:
     return ReportData(
         account_id=account_id,
         day=day_dir.name,
-        matches=read_jsonl(day_dir / "matches.jsonl"),
+        matches=(
+            [row for path in sorted((day_dir / "matches").glob("*.jsonl")) for row in read_jsonl(path)]
+            if (day_dir / "matches").exists()
+            else read_jsonl(day_dir / "matches.jsonl")
+        ),
         unmatched=read_jsonl(day_dir / "unmatched.jsonl"),
         snapshots=snapshots,
-        fill_counts=fill_counts,
-        fill_volumes=fill_volumes,
+        fill_counts=dict(fill_counts),
+        fill_volumes=dict(fill_volumes),
         exposure_matches=read_jsonl(day_dir / "exposure_matches.jsonl"),
         exposure_remain=read_jsonl(day_dir / "exposure_remain.jsonl"),
         funding=read_jsonl(day_dir / "funding.jsonl"),

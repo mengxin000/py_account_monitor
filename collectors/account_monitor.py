@@ -188,7 +188,9 @@ class JsonlEventStore:
             "symbol": symbol,
             "data": event,
         }
-        return self.append(f"{symbol}.jsonl", record)
+        # One chronological source of truth per account/day. Pairing and
+        # Exposure grouping are derived later by underlying asset.
+        return self.append("trade_callbacks.jsonl", record)
 
 
 class BinanceAccountMonitor:

@@ -21,7 +21,7 @@ Copy-Item config/accounts.local.example.json config/accounts.local.json
 Copy-Item config/email.local.example.json config/email.local.json
 ```
 
-`accounts.local.json` 只负责列出三个账户和报告周期。日期不需要配置，程序每天自动使用当前日期创建目录，跨午夜会自动切换到新日期目录。
+`accounts.local.json` 只负责列出三个账户和报告周期。日期不需要配置，程序每天自动使用当前日期创建目录，跨午夜会自动切换到新日期目录。订单直接配对以客户端ID/系统ID关联为准，不受交易对限制，因此 USDT 与 USDC 对冲不需要额外配置；ID匹配失败后的 Exposure 抵消仍只在同一基础币内进行。
 
 ## 启动
 
@@ -52,9 +52,19 @@ uv run binance-monitor
 ```text
 runtime/
 ├─ zdl/YYYYMMDD/
+│  ├─ trade_callbacks.jsonl
+│  ├─ matches/AAVE.jsonl
+│  ├─ matches/SUI.jsonl
+│  ├─ unmatched.jsonl
+│  ├─ exposure_matches.jsonl
+│  ├─ exposure_remain.jsonl
+│  ├─ funding.jsonl
+│  └─ equity.json
 ├─ mfx/YYYYMMDD/
 └─ dh/YYYYMMDD/
 ```
+
+每个账户每天只有一个原始成交回调文件。报告回放时先按基础币分组；例如 `AAVEUSDT` 与 `AAVEUSDC` 都进入 AAVE 匹配器，普通配对结果写入 `matches/AAVE.jsonl`，Exposure也只在AAVE内部处理。
 
 报告位于 `output/<account_id>/YYYYMMDD/`。cli为测试、重放和报告命令仍保留，供故障排查和历史数据补算使用，但日常运行不需要它们。
 

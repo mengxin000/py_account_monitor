@@ -33,11 +33,11 @@ LOSS_FILL = PatternFill("solid", fgColor=RED)
 UNMATCHED_FILL = PatternFill("solid", fgColor=UNMATCHED)
 
 ORDER_HEADERS = [
-    "订单ID", "订单系统ID", "订单方向", "订单成交数量", "订单平均成交价格", "订单手续费",
+    "交易对", "订单ID", "订单系统ID", "订单方向", "订单成交数量", "订单平均成交价格", "订单手续费",
     "对冲订单ID", "对冲订单系统ID", "对冲订单方向", "对冲订单成交数量", "对冲订单平均成交价格",
     "对冲订单手续费", "收益", "成交价差", "成交时间",
 ]
-ORDER_WIDTHS = [23, 16, 11, 15, 18, 14, 23, 23, 11, 17, 21, 15, 16, 14, 23]
+ORDER_WIDTHS = [24, 23, 16, 11, 15, 18, 14, 23, 23, 11, 17, 21, 15, 16, 14, 23]
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -71,7 +71,11 @@ def _clear(ws: Any) -> None:
 
 def _order_row(row: dict[str, Any]) -> list[Any]:
     quantity = _float(row.get("quantity"))
+    order_symbol = str(row.get("current_symbol") or "").upper()
+    hedge_symbol = str(row.get("match_symbol") or "").upper()
+    pair = f"{order_symbol}_{hedge_symbol}" if order_symbol and hedge_symbol else order_symbol or hedge_symbol
     return [
+        pair,
         row.get("current_id", ""), row.get("current_system_id", ""), row.get("current_side", ""), quantity,
         _float(row.get("current_price")), _float(row.get("current_fee")),
         row.get("match_id", ""), row.get("match_system_id", ""), row.get("match_side", ""), quantity,
@@ -82,6 +86,7 @@ def _order_row(row: dict[str, Any]) -> list[Any]:
 
 def _unmatched_row(row: dict[str, Any]) -> list[Any]:
     return [
+        str(row.get("symbol") or "").upper(),
         row.get("id", ""), row.get("system_id", ""), row.get("side", ""), _float(row.get("quantity")),
         _float(row.get("price")), _float(row.get("fee")), "", "", "", "", "", "", "", "",
         _time_text(row.get("time_ms")),
@@ -112,7 +117,7 @@ def _write_orders(ws: Any, data: ReportData) -> None:
         fill = UNMATCHED_FILL if kind == "unmatched" else (LOSS_FILL if _float(record.get("profit")) < 0 else MATCH_FILL)
         for cell in ws[ws.max_row]:
             _style(cell, fill)
-        for col in (*range(4, 7), *range(10, 15)):
+        for col in (*range(5, 8), *range(11, 16)):
             ws.cell(ws.max_row, col).number_format = "0.000000"
 
 
@@ -186,7 +191,7 @@ def _write_profit_block(ws: Any, data: ReportData) -> None:
     # Keep the per-symbol trading summary visible in the workbook.  This is
     # independent of the removed HK/US and market-order statistics.
     summary_header = stats_header + 4
-    symbol_titles = ["交易对", "成交事件", "配对次数", "配对数量", "配对收益", "Exposure匹配数量", "Exposure匹配收益", "Exposure剩余数量"]
+    symbol_titles = ["基础币", "成交事件", "配对次数", "配对数量", "配对收益", "Exposure匹配数量", "Exposure匹配收益", "Exposure剩余数量"]
     for col, title_text in enumerate(symbol_titles, 1):
         ws.cell(summary_header, col, title_text)
         _style(ws.cell(summary_header, col), HEADER_FILL, bold=True, white_font=True)

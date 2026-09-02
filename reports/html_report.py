@@ -48,7 +48,7 @@ body{{font-family:Arial,'Microsoft YaHei',sans-serif;color:#111;margin:24px}}h2{
 </style></head><body><h2>{html.escape(data.account_id)} 账户监控日报 - {html.escape(data.day)}</h2>
 <div class='section'><h3>收益与成交量</h3><table><tr>{metric_headers}</tr><tr>{metric_values}</tr></table></div>
 <div class='section'><h3>配对统计</h3><table><tr>{stats_headers}</tr><tr>{stats_values}</tr></table></div>
-<div class='section'><h3>交易对汇总</h3><table><tr><th>交易对</th><th>成交量(U)</th><th>配对数</th><th>盈利配对数</th><th>亏损配对数</th><th>未匹配条数</th><th>配对收益</th><th>Exposure配对收益</th></tr>{symbol_rows}</table></div>
+<div class='section'><h3>基础币汇总</h3><table><tr><th>基础币</th><th>成交量(U)</th><th>配对数</th><th>盈利配对数</th><th>亏损配对数</th><th>未匹配条数</th><th>配对收益</th><th>Exposure配对收益</th></tr>{symbol_rows}</table></div>
 </body></html>"""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
