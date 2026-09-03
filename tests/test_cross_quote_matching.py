@@ -59,7 +59,13 @@ class CrossQuoteMatchingTest(unittest.TestCase):
             orders = workbook["成交订单明细"]
             self.assertEqual(orders["A1"].value, "交易对")
             self.assertEqual(orders["A2"].value, "AAVEUSDT_AAVEUSDC")
-            self.assertEqual(orders["B1"].value, "订单ID")
+            self.assertEqual(orders["B1"].value, "成交价差")
+            self.assertEqual(orders["C1"].value, "成交时间")
+            self.assertEqual(orders["D1"].value, "订单ID")
+            self.assertAlmostEqual(orders["B2"].value, match["offset"])
+            self.assertTrue(orders["C2"].value)
+            self.assertEqual(orders["D2"].value, match["current_id"])
+            self.assertAlmostEqual(orders["P2"].value, match["profit"])
             workbook.close()
 
     def test_unrelated_symbols_do_not_share_exposure_queue(self) -> None:

@@ -17,8 +17,10 @@ from typing import Any
 
 try:
     from ..core.legacy_matching import LegacyMatcher
+    from ..core.jsonl_io import iter_jsonl
 except ImportError:
     from core.legacy_matching import LegacyMatcher  # type: ignore[no-redef]
+    from core.jsonl_io import iter_jsonl  # type: ignore[no-redef]
 
 
 def _event_time(event: dict[str, Any]) -> int:
@@ -40,7 +42,7 @@ def _exposure_key(symbol: str) -> str:
 
 
 def replay_day(day_dir: Path) -> dict[str, Any]:
-    events: list[tuple[int, str, int, dict[str, Any]]] = []
+    events: list[tuple[int, str, int, int, dict[str, Any]]] = []
     generated_files = {
         "account_info.jsonl",
         "funding.jsonl",
@@ -55,25 +57,22 @@ def replay_day(day_dir: Path) -> dict[str, Any]:
         # with no Binance client/system ID on every subsequent report run.
         if path.name in generated_files:
             continue
-        for line_no, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-            if not line.strip():
-                continue
-            record = json.loads(line)
+        for line_no, object_no, record in iter_jsonl(path):
             event = record.get("data", record)
             if not isinstance(event, dict):
                 continue
             event_time = _event_time(event)
-            events.append((event_time, path.name, line_no, event))
+            events.append((event_time, path.name, line_no, object_no, event))
     # Do not combine the line number into a string tie-breaker: lexical order
     # places line 10 before line 9. Binance can emit PARTIALLY_FILLED and
     # FILLED callbacks with the same millisecond timestamp, so preserve their
     # numeric JSONL order to accumulate quantity and commission correctly.
-    events.sort(key=lambda item: (item[0], item[1], item[2]))
+    events.sort(key=lambda item: (item[0], item[1], item[2], item[3]))
 
     # One matcher per underlying: AAVEUSDT and AAVEUSDC share all direct and
     # Exposure queues, while an unrelated asset can never enter those queues.
     matchers: dict[str, LegacyMatcher] = {}
-    for event_time, _, _, event in events:
+    for event_time, _, _, _, event in events:
         probe = LegacyMatcher()
         order = probe.from_order_event(event)
         matcher = matchers.setdefault(_exposure_key(order.symbol), LegacyMatcher())

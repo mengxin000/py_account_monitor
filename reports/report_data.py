@@ -6,15 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+try:
+    from ..core.jsonl_io import iter_jsonl
+except ImportError:
+    from core.jsonl_io import iter_jsonl  # type: ignore[no-redef]
+
 
 def read_jsonl(path: Path) -> list[dict[str, Any]]:
     if not path.exists():
         return []
-    rows: list[dict[str, Any]] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        if line.strip():
-            rows.append(json.loads(line))
-    return rows
+    return [row for _, _, row in iter_jsonl(path)]
 
 
 def base_asset(symbol: object) -> str:

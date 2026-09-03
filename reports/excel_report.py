@@ -33,11 +33,11 @@ LOSS_FILL = PatternFill("solid", fgColor=RED)
 UNMATCHED_FILL = PatternFill("solid", fgColor=UNMATCHED)
 
 ORDER_HEADERS = [
-    "交易对", "订单ID", "订单系统ID", "订单方向", "订单成交数量", "订单平均成交价格", "订单手续费",
+    "交易对", "成交价差", "成交时间", "订单ID", "订单系统ID", "订单方向", "订单成交数量", "订单平均成交价格", "订单手续费",
     "对冲订单ID", "对冲订单系统ID", "对冲订单方向", "对冲订单成交数量", "对冲订单平均成交价格",
-    "对冲订单手续费", "收益", "成交价差", "成交时间",
+    "对冲订单手续费", "收益",
 ]
-ORDER_WIDTHS = [24, 23, 16, 11, 15, 18, 14, 23, 23, 11, 17, 21, 15, 16, 14, 23]
+ORDER_WIDTHS = [24, 14, 23, 23, 16, 11, 15, 18, 14, 23, 23, 11, 17, 21, 15, 16]
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -75,21 +75,19 @@ def _order_row(row: dict[str, Any]) -> list[Any]:
     hedge_symbol = str(row.get("match_symbol") or "").upper()
     pair = f"{order_symbol}_{hedge_symbol}" if order_symbol and hedge_symbol else order_symbol or hedge_symbol
     return [
-        pair,
+        pair, _float(row.get("offset")), _time_text(row.get("event_time_ms")),
         row.get("current_id", ""), row.get("current_system_id", ""), row.get("current_side", ""), quantity,
         _float(row.get("current_price")), _float(row.get("current_fee")),
         row.get("match_id", ""), row.get("match_system_id", ""), row.get("match_side", ""), quantity,
         _float(row.get("match_price")), _float(row.get("match_fee")), _float(row.get("profit")),
-        _float(row.get("offset")), _time_text(row.get("event_time_ms")),
     ]
 
 
 def _unmatched_row(row: dict[str, Any]) -> list[Any]:
     return [
-        str(row.get("symbol") or "").upper(),
+        str(row.get("symbol") or "").upper(), "", _time_text(row.get("time_ms")),
         row.get("id", ""), row.get("system_id", ""), row.get("side", ""), _float(row.get("quantity")),
-        _float(row.get("price")), _float(row.get("fee")), "", "", "", "", "", "", "", "",
-        _time_text(row.get("time_ms")),
+        _float(row.get("price")), _float(row.get("fee")), "", "", "", "", "", "", "",
     ]
 
 
@@ -117,7 +115,7 @@ def _write_orders(ws: Any, data: ReportData) -> None:
         fill = UNMATCHED_FILL if kind == "unmatched" else (LOSS_FILL if _float(record.get("profit")) < 0 else MATCH_FILL)
         for cell in ws[ws.max_row]:
             _style(cell, fill)
-        for col in (*range(5, 8), *range(11, 16)):
+        for col in (2, *range(7, 10), *range(13, 17)):
             ws.cell(ws.max_row, col).number_format = "0.000000"
 
 

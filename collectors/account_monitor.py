@@ -114,6 +114,7 @@ class JsonlEventStore:
         self.root = Path(root)
         self.account_id = account_id
         self._lock = threading.Lock()
+        self._prepared_paths: set[Path] = set()
 
     def _path(self, filename: str, now: datetime | None = None) -> Path:
         folder = _date_folder(self.root, now)
@@ -126,6 +127,15 @@ class JsonlEventStore:
         with self._lock:
             for attempt, delay in enumerate((0.0, 0.02, 0.05, 0.10, 0.20, 0.40), 1):
                 try:
+                    if path not in self._prepared_paths:
+                        if path.exists() and path.stat().st_size:
+                            with path.open("rb+") as binary_stream:
+                                binary_stream.seek(-1, os.SEEK_END)
+                                if binary_stream.read(1) not in {b"\n", b"\r"}:
+                                    binary_stream.seek(0, os.SEEK_END)
+                                    binary_stream.write(b"\n")
+                                    binary_stream.flush()
+                        self._prepared_paths.add(path)
                     with path.open("a", encoding="utf-8", newline="\n") as stream:
                         stream.write(line)
                         stream.flush()
