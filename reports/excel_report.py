@@ -107,7 +107,9 @@ def _write_orders(ws: Any, data: ReportData) -> None:
         *((record, "unmatched") for record in data.unmatched),
     ]
     rows.sort(key=lambda item: (
-        str(item[0].get("current_symbol") or item[0].get("match_symbol") or item[0].get("symbol") or "").upper(),
+        # 按照交易对排序
+        # str(item[0].get("current_symbol") or item[0].get("match_symbol") or item[0].get("symbol") or "").upper(),
+        # 按照时间排序
         _float(item[0].get("event_time_ms", item[0].get("time_ms", 0))),
     ))
     for record, kind in rows:
