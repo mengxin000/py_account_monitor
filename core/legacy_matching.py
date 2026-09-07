@@ -32,6 +32,19 @@ def is_matching_order(
     return False
 
 
+def quoted_spread_from_client_id(client_id: str, market_type: str) -> float | None:
+    """Decode the value after the third ``_`` in ORDER_TRADE_UPDATE ``c``."""
+    if market_type != "futures":
+        return None
+    parts = client_id.split("_", 3)
+    if len(parts) != 4:
+        return None
+    try:
+        return int(parts[3]) / 100_000.0
+    except ValueError:
+        return None
+
+
 @dataclass
 class MatchOrder:
     id: str
@@ -66,6 +79,7 @@ class MatchRecord:
     event_time_ms: int
     current_symbol: str = ""
     match_symbol: str = ""
+    quoted_spread: float | None = None
 
 
 @dataclass(frozen=True)
@@ -210,6 +224,11 @@ class LegacyMatcher:
                 else:
                     futures_price, spot_price = sell_price, buy_price
                 offset = (futures_price - spot_price) / futures_price if futures_price else 0.0
+                quoted_spread = quoted_spread_from_client_id(
+                    queued_order.id, queued_order.market_type
+                )
+                if quoted_spread is None:
+                    quoted_spread = quoted_spread_from_client_id(current.id, current.market_type)
                 record = MatchRecord(
                     current_id=queued_order.id,
                     current_system_id=queued_order.system_id,
@@ -227,6 +246,7 @@ class LegacyMatcher:
                     event_time_ms=current.time_ms,
                     current_symbol=queued_order.symbol,
                     match_symbol=current.symbol,
+                    quoted_spread=quoted_spread,
                 )
                 output.append(record)
                 self.records.append(record)

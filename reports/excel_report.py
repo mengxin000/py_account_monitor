@@ -19,9 +19,10 @@ BLUE = "1F4E78"
 LIGHT_BLUE = "D9EAF7"
 WHITE = "FFFFFF"
 BLACK = "000000"
-GREEN = "E2F0D9"
-RED = "FCE4D6"
-UNMATCHED = "DDEBF7"
+DEEP_RED = "9C0006"
+GREEN = "C8FFC8"
+RED = "FFC8C8"
+UNMATCHED = "C8DCFF"
 GRID = "A6A6A6"
 THIN = Side(style="thin", color=GRID)
 BORDER = Border(left=THIN, right=THIN, top=THIN, bottom=THIN)
@@ -33,11 +34,11 @@ LOSS_FILL = PatternFill("solid", fgColor=RED)
 UNMATCHED_FILL = PatternFill("solid", fgColor=UNMATCHED)
 
 ORDER_HEADERS = [
-    "交易对", "成交价差", "成交时间", "订单ID", "订单系统ID", "订单方向", "订单成交数量", "订单平均成交价格", "订单手续费",
+    "交易对", "价差", "成交价差", "成交时间", "订单ID", "订单系统ID", "订单方向", "订单成交数量", "订单平均成交价格", "订单手续费",
     "对冲订单ID", "对冲订单系统ID", "对冲订单方向", "对冲订单成交数量", "对冲订单平均成交价格",
     "对冲订单手续费", "收益",
 ]
-ORDER_WIDTHS = [24, 14, 23, 23, 16, 11, 15, 18, 14, 23, 23, 11, 17, 21, 15, 16]
+ORDER_WIDTHS = [24, 14, 14, 23, 23, 16, 11, 15, 18, 14, 23, 23, 11, 17, 21, 15, 16]
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -75,7 +76,7 @@ def _order_row(row: dict[str, Any]) -> list[Any]:
     hedge_symbol = str(row.get("match_symbol") or "").upper()
     pair = f"{order_symbol}_{hedge_symbol}" if order_symbol and hedge_symbol else order_symbol or hedge_symbol
     return [
-        pair, _float(row.get("offset")), _time_text(row.get("event_time_ms")),
+        pair, row.get("quoted_spread"), _float(row.get("offset")), _time_text(row.get("event_time_ms")),
         row.get("current_id", ""), row.get("current_system_id", ""), row.get("current_side", ""), quantity,
         _float(row.get("current_price")), _float(row.get("current_fee")),
         row.get("match_id", ""), row.get("match_system_id", ""), row.get("match_side", ""), quantity,
@@ -85,7 +86,7 @@ def _order_row(row: dict[str, Any]) -> list[Any]:
 
 def _unmatched_row(row: dict[str, Any]) -> list[Any]:
     return [
-        str(row.get("symbol") or "").upper(), "", _time_text(row.get("time_ms")),
+        str(row.get("symbol") or "").upper(), "", "", _time_text(row.get("time_ms")),
         row.get("id", ""), row.get("system_id", ""), row.get("side", ""), _float(row.get("quantity")),
         _float(row.get("price")), _float(row.get("fee")), "", "", "", "", "", "", "",
     ]
@@ -117,7 +118,11 @@ def _write_orders(ws: Any, data: ReportData) -> None:
         fill = UNMATCHED_FILL if kind == "unmatched" else (LOSS_FILL if _float(record.get("profit")) < 0 else MATCH_FILL)
         for cell in ws[ws.max_row]:
             _style(cell, fill)
-        for col in (2, *range(7, 10), *range(13, 17)):
+        spread = record.get("quoted_spread") if kind == "match" else None
+        if spread is not None and abs(_float(spread) - _float(record.get("offset"))) > 0.0003:
+            for cell in ws[ws.max_row]:
+                cell.font = Font(name="Microsoft YaHei", size=10, color=DEEP_RED)
+        for col in (2, 3, *range(8, 11), *range(14, 18)):
             ws.cell(ws.max_row, col).number_format = "0.000000"
 
 

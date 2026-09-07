@@ -7,12 +7,20 @@ from pathlib import Path
 
 from openpyxl import load_workbook
 
+from core.legacy_matching import quoted_spread_from_client_id
 from replay.batch_replay import replay_day
 from reports.excel_report import build_workbook
 from reports.report_data import load_report_data
 
 
 class CrossQuoteMatchingTest(unittest.TestCase):
+    def test_strategy_spread_is_decoded_only_for_futures(self) -> None:
+        self.assertAlmostEqual(quoted_spread_from_client_id("zdlf_691190_65_11", "futures"), 0.00011)
+        self.assertAlmostEqual(quoted_spread_from_client_id("zdlf_691190_65_-11", "futures"), -0.00011)
+        self.assertIsNone(quoted_spread_from_client_id("zdlf_691190_65_11", "spot"))
+        self.assertIsNone(quoted_spread_from_client_id("zdlf_691190_11", "futures"))
+        self.assertIsNone(quoted_spread_from_client_id("zdlf_691190_65_bad", "futures"))
+
     def test_usdt_and_usdc_symbols_match_by_id_without_configuration(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             day_dir = Path(temp_dir)
@@ -21,7 +29,7 @@ class CrossQuoteMatchingTest(unittest.TestCase):
                     "e": "ORDER_TRADE_UPDATE",
                     "E": 1_000,
                     "o": {
-                        "s": "AAVEUSDT", "c": "base-order", "S": "BUY",
+                        "s": "AAVEUSDT", "c": "zdlf_691190_65_-11", "S": "BUY",
                         "X": "FILLED", "i": 12345, "z": "1", "L": "100",
                         "n": "0.01", "N": "USDT", "T": 1_000,
                     },
@@ -59,13 +67,16 @@ class CrossQuoteMatchingTest(unittest.TestCase):
             orders = workbook["成交订单明细"]
             self.assertEqual(orders["A1"].value, "交易对")
             self.assertEqual(orders["A2"].value, "AAVEUSDT_AAVEUSDC")
-            self.assertEqual(orders["B1"].value, "成交价差")
-            self.assertEqual(orders["C1"].value, "成交时间")
-            self.assertEqual(orders["D1"].value, "订单ID")
-            self.assertAlmostEqual(orders["B2"].value, match["offset"])
-            self.assertTrue(orders["C2"].value)
-            self.assertEqual(orders["D2"].value, match["current_id"])
-            self.assertAlmostEqual(orders["P2"].value, match["profit"])
+            self.assertEqual(orders["B1"].value, "价差")
+            self.assertEqual(orders["C1"].value, "成交价差")
+            self.assertEqual(orders["D1"].value, "成交时间")
+            self.assertEqual(orders["E1"].value, "订单ID")
+            self.assertAlmostEqual(orders["B2"].value, -0.00011)
+            self.assertAlmostEqual(orders["C2"].value, match["offset"])
+            self.assertTrue(orders["D2"].value)
+            self.assertEqual(orders["E2"].value, match["current_id"])
+            self.assertAlmostEqual(orders["Q2"].value, match["profit"])
+            self.assertEqual(orders["A2"].font.color.rgb, "009C0006")
             workbook.close()
 
     def test_unrelated_symbols_do_not_share_exposure_queue(self) -> None:
