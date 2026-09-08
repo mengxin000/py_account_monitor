@@ -80,6 +80,7 @@ class MatchRecord:
     current_symbol: str = ""
     match_symbol: str = ""
     quoted_spread: float | None = None
+    quoted_spread_side: str = ""
 
 
 @dataclass(frozen=True)
@@ -227,8 +228,10 @@ class LegacyMatcher:
                 quoted_spread = quoted_spread_from_client_id(
                     queued_order.id, queued_order.market_type
                 )
+                quoted_spread_side = queued_order.side if quoted_spread is not None else ""
                 if quoted_spread is None:
                     quoted_spread = quoted_spread_from_client_id(current.id, current.market_type)
+                    quoted_spread_side = current.side if quoted_spread is not None else ""
                 record = MatchRecord(
                     current_id=queued_order.id,
                     current_system_id=queued_order.system_id,
@@ -247,6 +250,7 @@ class LegacyMatcher:
                     current_symbol=queued_order.symbol,
                     match_symbol=current.symbol,
                     quoted_spread=quoted_spread,
+                    quoted_spread_side=quoted_spread_side,
                 )
                 output.append(record)
                 self.records.append(record)

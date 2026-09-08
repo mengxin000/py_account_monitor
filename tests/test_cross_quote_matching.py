@@ -9,11 +9,29 @@ from openpyxl import load_workbook
 
 from core.legacy_matching import quoted_spread_from_client_id
 from replay.batch_replay import replay_day
-from reports.excel_report import build_workbook
+from reports.excel_report import build_workbook, _is_adverse_slippage
 from reports.report_data import load_report_data
 
 
 class CrossQuoteMatchingTest(unittest.TestCase):
+    def test_adverse_slippage_uses_signed_spreads_and_futures_side(self) -> None:
+        for side, quoted, actual, expected in [
+            ("SELL", -0.0004, -0.0001, False),
+            ("SELL", -0.0001, -0.0004, True),
+            ("BUY", -0.0001, -0.0004, False),
+            ("BUY", -0.0004, -0.0001, True),
+            ("SELL", -0.0001, 0.0001, False),
+            ("BUY", -0.0001, 0.0001, True),
+            ("SELL", 0.0004, 0.0001, True),
+            ("BUY", 0.0004, 0.0001, False),
+            ("BUY", 0.0001, 0.0001, False),
+            ("", 0.0001, 0.0004, False),
+        ]:
+            with self.subTest(side=side, quoted=quoted, actual=actual):
+                self.assertEqual(_is_adverse_slippage({
+                    "quoted_spread_side": side, "quoted_spread": quoted, "offset": actual,
+                }), expected)
+
     def test_strategy_spread_is_decoded_only_for_futures(self) -> None:
         self.assertAlmostEqual(quoted_spread_from_client_id("zdlf_691190_65_11", "futures"), 0.00011)
         self.assertAlmostEqual(quoted_spread_from_client_id("zdlf_691190_65_-11", "futures"), -0.00011)
@@ -76,7 +94,7 @@ class CrossQuoteMatchingTest(unittest.TestCase):
             self.assertTrue(orders["D2"].value)
             self.assertEqual(orders["E2"].value, match["current_id"])
             self.assertAlmostEqual(orders["Q2"].value, match["profit"])
-            self.assertEqual(orders["A2"].font.color.rgb, "009C0006")
+            self.assertEqual(orders["A2"].font.color.rgb, "00000000")
             workbook.close()
 
     def test_unrelated_symbols_do_not_share_exposure_queue(self) -> None:

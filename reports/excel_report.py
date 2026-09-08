@@ -92,6 +92,19 @@ def _unmatched_row(row: dict[str, Any]) -> list[Any]:
     ]
 
 
+def _is_adverse_slippage(record: dict[str, Any]) -> bool:
+    spread = record.get("quoted_spread")
+    offset = record.get("offset")
+    if spread is None or offset is None:
+        return False
+    side = record.get("quoted_spread_side")
+    if side == "SELL":
+        return float(spread) > float(offset)
+    if side == "BUY":
+        return float(offset) > float(spread)
+    return False
+
+
 def _write_orders(ws: Any, data: ReportData) -> None:
     _clear(ws)
     ws.sheet_view.showGridLines = False
@@ -118,8 +131,7 @@ def _write_orders(ws: Any, data: ReportData) -> None:
         fill = UNMATCHED_FILL if kind == "unmatched" else (LOSS_FILL if _float(record.get("profit")) < 0 else MATCH_FILL)
         for cell in ws[ws.max_row]:
             _style(cell, fill)
-        spread = record.get("quoted_spread") if kind == "match" else None
-        if spread is not None and abs(_float(spread) - _float(record.get("offset"))) > 0.0003:
+        if kind == "match" and _is_adverse_slippage(record):
             for cell in ws[ws.max_row]:
                 cell.font = Font(name="Microsoft YaHei", size=10, color=DEEP_RED)
         for col in (2, 3, *range(8, 11), *range(14, 18)):
