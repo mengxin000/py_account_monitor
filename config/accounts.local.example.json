@@ -5,6 +5,15 @@
     "account_dh.local.json"
   ],
   "email_file": "email.local.json",
+  "market_data": {
+    "enabled": true,
+    "buffer_seconds": 30,
+    "buffer_max_records": 10000,
+    "market_queue_max": 50000,
+    "post_fill_seconds": 10,
+    "unsubscribe_idle_seconds": 60,
+    "retention_days": 3
+  },
   "first_report_delay_seconds": 180,
   "report_interval_seconds": 1800
 }

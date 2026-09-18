@@ -34,11 +34,11 @@ LOSS_FILL = PatternFill("solid", fgColor=RED)
 UNMATCHED_FILL = PatternFill("solid", fgColor=UNMATCHED)
 
 ORDER_HEADERS = [
-    "交易对", "价差", "成交价差", "成交时间", "订单ID", "订单系统ID", "订单方向", "订单成交数量", "订单平均成交价格", "订单手续费",
+    "交易对","方向", "价差", "成交价差", "成交时间", "订单ID", "订单系统ID", "订单方向", "订单成交数量", "订单平均成交价格", "订单手续费",
     "对冲订单ID", "对冲订单系统ID", "对冲订单方向", "对冲订单成交数量", "对冲订单平均成交价格",
     "对冲订单手续费", "收益",
 ]
-ORDER_WIDTHS = [24, 14, 14, 23, 23, 16, 11, 15, 18, 14, 23, 23, 11, 17, 21, 15, 16]
+ORDER_WIDTHS = [24 ,11 , 14, 14, 23, 23, 16, 11, 15, 18, 14, 23, 23, 11, 17, 21, 15, 16]
 
 
 def _float(value: Any, default: float = 0.0) -> float:
@@ -75,8 +75,9 @@ def _order_row(row: dict[str, Any]) -> list[Any]:
     order_symbol = str(row.get("current_symbol") or "").upper()
     hedge_symbol = str(row.get("match_symbol") or "").upper()
     pair = f"{order_symbol}_{hedge_symbol}" if order_symbol and hedge_symbol else order_symbol or hedge_symbol
+    spread_side = "开仓" if str(row.get("quoted_spread_side") or "").upper() == "SELL" else "平仓"
     return [
-        pair, row.get("quoted_spread"), _float(row.get("offset")), _time_text(row.get("event_time_ms")),
+        pair, spread_side, row.get("quoted_spread"), _float(row.get("offset")), _time_text(row.get("event_time_ms")),
         row.get("current_id", ""), row.get("current_system_id", ""), row.get("current_side", ""), quantity,
         _float(row.get("current_price")), _float(row.get("current_fee")),
         row.get("match_id", ""), row.get("match_system_id", ""), row.get("match_side", ""), quantity,
@@ -86,7 +87,7 @@ def _order_row(row: dict[str, Any]) -> list[Any]:
 
 def _unmatched_row(row: dict[str, Any]) -> list[Any]:
     return [
-        str(row.get("symbol") or "").upper(), "", "", _time_text(row.get("time_ms")),
+        str(row.get("symbol") or "").upper(), "", "", "", _time_text(row.get("time_ms")),
         row.get("id", ""), row.get("system_id", ""), row.get("side", ""), _float(row.get("quantity")),
         _float(row.get("price")), _float(row.get("fee")), "", "", "", "", "", "", "",
     ]
@@ -164,8 +165,8 @@ def _write_profit_block(ws: Any, data: ReportData) -> None:
     account_row = start + 1
     account_values = [
         ("账户", data.account_id), ("交易日", data.day),
-        ("09:30基准权益", data.baseline_equity if data.baseline_equity is not None else 0.0),
-        ("当前权益", data.current_equity if data.current_equity is not None else 0.0),
+        (f"基准权益 ({data.baseline_time or '未就绪'})", data.baseline_equity if data.baseline_equity is not None else "基准未就绪"),
+        ("当前权益", data.current_equity if data.current_equity is not None else "权益未就绪"),
     ]
     for index, (label, value) in enumerate(account_values):
         col = 1 + index * 2
@@ -192,7 +193,7 @@ def _write_profit_block(ws: Any, data: ReportData) -> None:
     ]
     for col, (header, value, fmt) in enumerate(metrics, 1):
         ws.cell(metric_header, col, header)
-        ws.cell(metric_header + 1, col, value)
+        ws.cell(metric_header + 1, col, value if value is not None else "权益或基准未就绪")
         _style(ws.cell(metric_header, col), HEADER_FILL, bold=True, white_font=True)
         _style(ws.cell(metric_header + 1, col))
         ws.cell(metric_header + 1, col).number_format = fmt

@@ -7,6 +7,8 @@ from .report_data import ReportData
 
 
 def _number(value: object) -> str:
+    if value is None:
+        return "权益或基准未就绪"
     if isinstance(value, float):
         return f"{value:.10f}"
     if isinstance(value, int):

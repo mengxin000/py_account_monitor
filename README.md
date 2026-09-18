@@ -1,5 +1,44 @@
 # Binance 多账户监控
 
+## 公共最优报价采集
+
+使用原启动命令 `uv run binance-monitor`。`config/accounts.local.json` 的
+`market_data` 配置控制共享采集器，默认启用，缓存30秒（每订阅最多10000条），
+每次实际成交保存此前30秒及此后10秒的报价更新。所有账户共用市场/交易对订阅，
+重叠成交窗口通过写入游标合并，不重复保存相同缓存记录。
+
+账户09:30交易日目录中，`all_callbacks.jsonl`保存全部订单状态，
+`trade_callbacks.jsonl`继续保存配对所需记录；分析文件不进入配对或成交量统计。
+
+行情按本地接收时间、自然日和小时保存，例如：
+`runtime/raw/20260909/spot/AAVEUSDC/15.jsonl`、
+`runtime/raw/20260909/futures/AAVEUSDT/15.jsonl`。
+字段为 `receivedTimeMs`、`eventTimeMs`、`transactionTimeMs`、`updateId`、
+`sequence`、`bidPrice`、`bidQty`、`askPrice`、`askQty`，价格数量保留原始字符串精度。
+接口没有提供交易所时间时保存null，不伪造时间。
+窗口采用本地接收时刻对齐，交易所成交时间保留在 `windows.jsonl` 供后续分析。
+该文件同时保存成交触发、实际可用缓存起点、连接和断线事件。
+首次订阅之前、网络断开期间、缓存达到条数上限被淘汰的行情无法补回。
+
+一个小时结束60秒后压缩为 `.jsonl.gz`，压缩/写入在后台进行。
+仅行情 `runtime/raw` 保留今天及前两天，定时删除更早的自然日目录；
+账户原始回调和收益文件不受清理影响。
+所有账户在该市场/交易对均无挂单连续60秒，且成交保存窗口结束后，
+关闭对应连接并释放缓存。有活跃挂单即使长时间没有回调也继续订阅。
+
+启动及每60秒用统一账户REST校准挂单。现货保证金 `/papi/v1/margin/openOrders` 和
+U 本位期货 `/papi/v1/um/openOrders` 均可不传 `symbol` 返回全部当前挂单，按返回结果发现并维护交易对；
+成交回调仍会即时创建交易对订阅，因此不依赖历史 JSONL 扫描。首次部署且从未收到回调的既有挂单也能通过该接口发现。
+
+现货使用一条 combined `bookTicker` WebSocket，期货使用另一条 combined WebSocket。
+交易对变化时通过连接内的 `SUBSCRIBE` / `UNSUBSCRIBE` 消息动态更新，不重建连接；只有真正断线时才自动重连。
+行情写入队列有上限，磁盘跟不上时淘汰最旧行情；
+连接、重连、退订和存储异常记录到运行日志。成交窗口、连接状态和退订等关键事件使用独立的无淘汰队列，优先落盘。
+
+接口依据：[现货WebSocket](https://github.com/binance/binance-spot-api-docs/blob/master/web-socket-streams.md)、
+[UM bookTicker](https://developers.binance.com/docs/derivatives/usds-margined-futures/websocket-market-streams/Individual-Symbol-Book-Ticker-Streams)、
+[统一账户订单接口](https://developers.binance.com/en/docs/catalog/advanced-trading-derivatives-trading-portfolio-margin/api/rest-api/trade)。
+
 这是一个只读监控程序，不进行下单操作。一个常驻进程同时监控三个子账户，持续保存成交 JSONL，并按固定间隔自动完成配对、权益/收益计算、Excel/HTML 生成和邮件发送。
 
 ## 配置

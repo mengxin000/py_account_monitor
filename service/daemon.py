@@ -11,6 +11,7 @@ import argparse
 import asyncio
 import json
 import logging
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -23,6 +24,7 @@ try:
     from ..reports.html_report import build_html
     from ..reports.report_data import load_report_data
     from ..replay.batch_replay import replay_day
+    from ..collectors.market_collector import MarketCollector
 except ImportError:  # running from the project directory
     from collectors.account_monitor import BinanceAccountMonitor, load_config, trading_day
     from config.settings import load_email_settings
@@ -31,6 +33,7 @@ except ImportError:  # running from the project directory
     from reports.html_report import build_html
     from reports.report_data import load_report_data
     from replay.batch_replay import replay_day
+    from collectors.market_collector import MarketCollector
 
 LOGGER = logging.getLogger("binance_monitor_service")
 
@@ -53,32 +56,9 @@ def _age(moment: datetime | None) -> str:
 
 async def _dashboard(monitors: list[BinanceAccountMonitor], report_state: dict[str, datetime | None]) -> None:
     """Refresh a compact status view once per second without changing logic."""
+    from .dashboard import render
     while True:
-        lines = [
-            "Binance 多账户监控  |  Ctrl+C 停止  |  每 1 秒刷新",
-            f"当前时间: {datetime.now():%Y-%m-%d %H:%M:%S}    下次报告: {_age(report_state.get('next_report'))}",
-            "账户       REST账户权益       实际权益       可用余额       uniMMR       REST       成交回调       状态",
-            "-" * 112,
-        ]
-        for monitor in monitors:
-            status = monitor.status()
-            error = status["error"]
-            state = "ERROR" if error else "RUNNING"
-            lines.append(
-                f"{status['account_id']:<10}"
-                f"{_fmt(status['account_equity']):>16}"
-                f"{_fmt(status['actual_equity']):>15}"
-                f"{_fmt(status['available']):>15}"
-                f"{_fmt(status['unimmr']):>12}"
-                f"{_age(status['account_at']):>10}"
-                f"{_age(status['trade_at']):>12}"
-                f"  {state}"
-            )
-            if error:
-                lines.append(f"  最近错误: {error[:120]}")
-        lines.append("")
-        lines.append("数据目录: runtime/<account_id>/YYYYMMDD    报告目录: output/<account_id>/YYYYMMDD")
-        print("\x1b[2J\x1b[H" + "\n".join(lines), end="", flush=True)
+        print("\x1b[2J\x1b[H" + render(monitors, report_state), flush=True)
         await asyncio.sleep(1)
 
 
@@ -185,9 +165,27 @@ async def _final_day_report_loop(monitors: list[BinanceAccountMonitor], email_pa
 
 async def run(service_path: Path) -> None:
     account_files, email_path, interval, first_delay = _load_service(service_path)
-    monitors = [BinanceAccountMonitor(load_config(path)) for path in account_files]
+    service_config = json.loads(service_path.read_text(encoding="utf-8"))
+    configs = [load_config(path) for path in account_files]
+    shared_proxy = service_config.get("proxy")
+    if shared_proxy:
+        configs = [replace(c, proxy=c.proxy or shared_proxy) for c in configs]
+    monitors = [BinanceAccountMonitor(c) for c in configs]
+    market_settings = dict(service_config.get("market_data", {}))
+    proxies = {c.proxy for c in configs if c.proxy}
+    if "proxy" not in market_settings:
+        if shared_proxy:
+            market_settings["proxy"] = shared_proxy
+        elif len(proxies) == 1:
+            market_settings["proxy"] = next(iter(proxies))
+        elif len(proxies) > 1:
+            raise ValueError("multiple account proxies: specify market_data.proxy for shared market data")
+    market = MarketCollector(service_path.parent.parent / "runtime" / "raw", market_settings)
+    for monitor in monitors:
+        monitor.market_collector = market
     report_state: dict[str, datetime | None] = {"last_report": None, "next_report": None}
     tasks = [asyncio.create_task(monitor.run()) for monitor in monitors]
+    tasks.append(asyncio.create_task(market.run(monitors)))
     tasks.append(asyncio.create_task(_report_loop(monitors, email_path, interval, first_delay, service_path.parent.parent, report_state)))
     tasks.append(asyncio.create_task(_final_day_report_loop(monitors, email_path, service_path.parent.parent)))
     tasks.append(asyncio.create_task(_dashboard(monitors, report_state)))
@@ -216,14 +214,15 @@ def main() -> None:
     # intentionally quiet for the dashboard.
     root_logger.setLevel(logging.INFO)
     log_path = log_dir / f"{trading_day()}run.txt"
-    file_handler = logging.FileHandler(log_path, encoding="utf-8")
+    from .logging_support import TradingDayFileHandler
+    file_handler = TradingDayFileHandler(log_dir)
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(formatter)
     root_logger.addHandler(file_handler)
     console_handler = logging.StreamHandler()
     console_handler.setLevel(getattr(logging, args.log_level))
     console_handler.setFormatter(formatter)
-    root_logger.addHandler(console_handler)
+    # Dashboard owns stdout; diagnostics must not corrupt its redraw.
     LOGGER.info("monitor service starting config=%s", args.config.resolve())
     asyncio.run(run(args.config.resolve()))
 

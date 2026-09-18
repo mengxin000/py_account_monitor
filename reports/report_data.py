@@ -45,6 +45,8 @@ class ReportData:
     current_equity: float | None = None
     current_time: str | None = None
     current_positions: Any = None
+    equity_state_present: bool = False
+    equity_scope: str = "legacy_pm"
 
     @property
     def profit_summary(self) -> dict[str, Any]:
@@ -55,7 +57,7 @@ class ReportData:
         persisted equity and position snapshots when available.
         """
         current_equity = self.current_equity
-        if current_equity is None and self.snapshots:
+        if current_equity is None and self.snapshots and not self.equity_state_present:
             raw = self.last_snapshot.get("actualEquity", self.last_snapshot.get("accountEquity"))
             try:
                 current_equity = float(raw) if raw is not None else None
@@ -80,8 +82,6 @@ class ReportData:
             or self._position_map(self.current_positions)
         )
         theoretical = trade_profit + funding_profit + vibration
-        if actual is None:
-            actual = theoretical
         matched_qty = sum(float(row.get("quantity", 0) or 0) for row in self.matches)
         unmatched_qty = sum(float(row.get("quantity", 0) or 0) for row in self.exposure_remain)
         total_records = len(self.matches) + len(self.unmatched)
@@ -92,7 +92,7 @@ class ReportData:
         return {
             "actual_profit": actual,
             "theoretical_profit": theoretical,
-            "profit_difference": actual - theoretical,
+            "profit_difference": actual - theoretical if actual is not None else None,
             "trade_profit": trade_profit,
             "fee_profit": funding_profit,
             "funding_profit": funding_profit,
@@ -206,6 +206,8 @@ def load_report_data(day_dir: Path, account_id: str) -> ReportData:
     fill_counts: dict[str, int] = defaultdict(int)
     fill_volumes: dict[str, float] = defaultdict(float)
     for path in sorted(day_dir.glob("*.jsonl")):
+        if path.name == "all_callbacks.jsonl":
+            continue
         if path.name in {"account_info.jsonl", "matches.jsonl", "unmatched.jsonl", "exposure_matches.jsonl", "exposure_remain.jsonl", "funding.jsonl"}:
             continue
         events = read_jsonl(path)
@@ -258,4 +260,6 @@ def load_report_data(day_dir: Path, account_id: str) -> ReportData:
         current_equity=(float(state["latestEquity"]) if state.get("latestEquity") is not None else None),
         current_time=state.get("latestTime"),
         current_positions=state.get("latestPositions", []),
+        equity_state_present=bool(state),
+        equity_scope=str(state.get("equityScope", "legacy_pm")),
     )

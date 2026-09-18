@@ -44,6 +44,7 @@ def _exposure_key(symbol: str) -> str:
 def replay_day(day_dir: Path) -> dict[str, Any]:
     events: list[tuple[int, str, int, int, dict[str, Any]]] = []
     generated_files = {
+        "all_callbacks.jsonl",
         "account_info.jsonl",
         "funding.jsonl",
         "matches.jsonl",
@@ -61,6 +62,10 @@ def replay_day(day_dir: Path) -> dict[str, Any]:
             event = record.get("data", record)
             if not isinstance(event, dict):
                 continue
+            event = dict(event)
+            for key in ("exchange", "accountId", "accountScope"):
+                if key in record:
+                    event[key] = record[key]
             event_time = _event_time(event)
             events.append((event_time, path.name, line_no, object_no, event))
     # Do not combine the line number into a string tie-breaker: lexical order

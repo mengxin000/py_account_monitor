@@ -16,6 +16,7 @@ import argparse
 import asyncio
 import json
 import logging
+import math
 import os
 import re
 import signal
@@ -44,6 +45,16 @@ except ImportError:  # direct script execution from this directory
     )
 
 LOGGER = logging.getLogger("binance_account_monitor")
+try:
+    from ..connections.binance.spot_stream import BinanceSpotStream
+except ImportError:
+    from connections.binance.spot_stream import BinanceSpotStream
+from .binance.normalize import source_metadata
+from .binance.equity import spot_equity
+try:
+    from ..connections.diagnostics import connection_error
+except ImportError:
+    from connections.diagnostics import connection_error
 _SAFE_SYMBOL = re.compile(r"^[A-Z0-9_.-]+$")
 FUNDING_POLL_TIMES = ((0, 5), (8, 5), (16, 5))
 
@@ -60,6 +71,10 @@ class AccountMonitorConfig:
     include_positions: bool = True
     funding_interval_seconds: float = 60.0
     funding_income_path: str = "/papi/v1/um/income"
+    spot_enabled: bool = True
+    spot_credentials: BinanceCredentials | None = None
+    proxy: str | None = None
+    pm_usd_to_usdt: float = 1.0
 
 
 def trading_day(now: datetime | None = None) -> str:
@@ -184,13 +199,14 @@ class JsonlEventStore:
                     pass
         return path
 
-    def append_trade_event(self, event: Mapping[str, Any]) -> Path | None:
+    def append_trade_event(self, event: Mapping[str, Any], *, source: str = "unknown") -> Path | None:
         symbol = _event_symbol(event)
         if not symbol:
             return None
         if not _SAFE_SYMBOL.fullmatch(symbol):
             raise ValueError(f"unsafe Binance symbol for filename: {symbol!r}")
         record = {
+            **source_metadata(event, source),
             "recordType": "trade_callback",
             "accountId": self.account_id,
             "receivedTime": datetime.now().isoformat(timespec="milliseconds"),
@@ -207,6 +223,9 @@ class BinanceAccountMonitor:
     """Run one account's REST snapshot loop and private user stream."""
 
     def __init__(self, config: AccountMonitorConfig) -> None:
+        self.market_collector = None
+        if not math.isfinite(config.pm_usd_to_usdt) or config.pm_usd_to_usdt <= 0:
+            raise ValueError("pm_usd_to_usdt must be finite and positive")
         self.config = config
         self.store = JsonlEventStore(config.output_dir, config.account_id)
         self.stop_event = asyncio.Event()
@@ -214,6 +233,7 @@ class BinanceAccountMonitor:
             config.credentials,
             base_url=config.rest_base_url,
             logger=LOGGER,
+            proxy=config.proxy,
         )
         self.user_stream = BinanceUserDataStream(
             config.credentials,
@@ -222,12 +242,28 @@ class BinanceAccountMonitor:
             ),
             on_message=self._on_user_event,
             on_error=self._on_stream_error,
-            logger=LOGGER,
+            logger=logging.getLogger(f"binance_account_monitor.{config.account_id}.pm"),
+            proxy=config.proxy,
         )
+        self.spot_stream = BinanceSpotStream(
+            config.spot_credentials or config.credentials,
+            on_message=self._on_spot_event, on_error=self._on_stream_error,
+            logger=logging.getLogger(f"binance_account_monitor.{config.account_id}.spot"),
+            proxy=config.proxy,
+        ) if config.spot_enabled else None
         self._last_account: dict[str, Any] = {}
         self._last_account_at: datetime | None = None
         self._last_trade_at: datetime | None = None
         self._last_error: str | None = None
+        self._rest_errors = {}
+        self._stream_errors = {}
+        self._next_balance_at = 0.0
+        self._spot_at = None
+        self._spot_equity = None
+        self._total_equity = None
+        self._baseline_components = None
+        self._legacy_baseline = None
+        self._equity_scope = f"{'pm+spot' if config.spot_enabled else 'pm'}:USDT:{config.pm_usd_to_usdt}"
         self._baseline_equity: float | None = None
         self._baseline_at: datetime | None = None
         self._baseline_day: str | None = None
@@ -257,6 +293,13 @@ class BinanceAccountMonitor:
             return
         try:
             row = json.loads(path.read_text(encoding="utf-8"))
+            if row.get("equityScope") != self._equity_scope:
+                self._legacy_baseline = row
+                LOGGER.warning("equity scope changed account=%s; new baseline required", self.config.account_id)
+                self._baseline_day = trading_day()
+                return
+            self._baseline_components = row.get("baselineComponents")
+            self._legacy_baseline = row.get("previousScopeBaseline")
             if row.get("baselineEquity") is not None:
                 self._baseline_equity = float(row["baselineEquity"])
                 self._baseline_at = datetime.fromisoformat(row["baselineTime"])
@@ -279,7 +322,26 @@ class BinanceAccountMonitor:
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             LOGGER.warning("failed to load funding de-duplication state account=%s", self.config.account_id, exc_info=True)
 
-    async def _on_user_event(self, event: dict[str, Any]) -> None:
+    async def _on_spot_event(self, event: dict[str, Any]) -> None:
+        await self._on_user_event(event, source="spot_stream")
+
+    async def _on_user_event(self, event: dict[str, Any], *, source: str = "pm_stream") -> None:
+        metadata = source_metadata(event, source)
+        if _is_trade_callback(event):
+            try:
+                self.store.append("all_callbacks.jsonl", {
+                    **metadata,
+                    "recordType": "order_callback", "accountId": self.config.account_id,
+                    "receivedTime": datetime.now().isoformat(timespec="milliseconds"),
+                    "eventType": event.get("e"), "symbol": _event_symbol(event), "data": event,
+                })
+            except Exception:
+                LOGGER.exception("all callbacks write failed account=%s", self.config.account_id)
+            try:
+                if self.market_collector is not None:
+                    self.market_collector.order_event(self.config.account_id, {**event, "_accountScope": metadata["accountScope"]})
+            except Exception:
+                LOGGER.exception("market callback handling failed account=%s", self.config.account_id)
         # UM user streams emit ACCOUNT_UPDATE with reason FUNDING_FEE when a
         # funding settlement changes the account.  Keep the raw callback for
         # audit/replay; the authoritative amount is still collected by the
@@ -288,6 +350,7 @@ class BinanceAccountMonitor:
             account_update = event.get("a")
             if isinstance(account_update, Mapping) and str(account_update.get("m", "")) == "FUNDING_FEE":
                 self.store.append("funding.jsonl", {
+                    **metadata,
                     "recordType": "funding_callback",
                     "accountId": self.config.account_id,
                     "receivedTime": datetime.now().isoformat(timespec="milliseconds"),
@@ -296,7 +359,7 @@ class BinanceAccountMonitor:
                 LOGGER.info("funding callback received account=%s", self.config.account_id)
         if _is_fill_callback(event):
             self._last_trade_at = datetime.now()
-            path = self.store.append_trade_event(event)
+            path = self.store.append_trade_event(event, source=source)
             if path:
                 LOGGER.debug("trade callback %s -> %s", _event_symbol(event), path)
 
@@ -324,54 +387,114 @@ class BinanceAccountMonitor:
 
     async def _on_stream_error(self, event: dict[str, Any]) -> None:
         self._last_error = str(event.get("error", event))
-        LOGGER.warning("private stream error: %s", event)
+        self._stream_errors[str(event.get("source", "pm_stream"))] = self._last_error
+
+    async def _collect_equity(self):
+        """One coherent sample; failed components never become zero equity."""
+        now = datetime.now()
+        day = trading_day(now)
+        account = None
+        spot_value = 0.0 if self.spot_stream is None else None
+        assets = []
+        pm_time = spot_time = None
+        try:
+            account = await self.rest.get("/papi/v1/account", signed=True)
+            if account.get("actualEquity") is None:
+                raise ValueError("PM actualEquity unavailable")
+            if not math.isfinite(float(account["actualEquity"])):
+                raise ValueError("PM actualEquity non-finite")
+            self._last_account = account
+            self._last_account_at = pm_time = datetime.now()
+            self._rest_errors.pop("pm", None)
+            if self.config.include_positions:
+                try:
+                    account["positions"] = await self.rest.get("/papi/v1/um/positionRisk", signed=True)
+                except Exception:
+                    LOGGER.debug("position snapshot unavailable account=%s", self.config.account_id)
+            if self.config.include_balance and time.monotonic() >= self._next_balance_at:
+                try:
+                    account["balance"] = await self.rest.get("/papi/v1/balance", signed=True)
+                    self._next_balance_at = time.monotonic() + self.config.balance_interval_seconds
+                except Exception:
+                    LOGGER.debug("balance snapshot unavailable account=%s", self.config.account_id)
+        except Exception as exc:
+            account = None
+            self._rest_errors["pm"] = connection_error(exc, self.config.rest_base_url)
+        if self.spot_stream is not None:
+            try:
+                spot = await self.spot_stream.rest.get("/api/v3/account", signed=True)
+                tickers = await self.spot_stream.rest.get("/api/v3/ticker/price")
+                spot_value, assets = spot_equity(spot, tickers.get("data", []))
+                self._spot_at = spot_time = datetime.now()
+                self._rest_errors.pop("spot", None)
+            except Exception as exc:
+                self._rest_errors["spot"] = connection_error(exc, "https://api.binance.com")
+                if isinstance(exc, ValueError):
+                    self._rest_errors["spot"] = str(exc)
+        self._spot_equity = spot_value
+        self._total_equity = None
+        if pm_time and spot_time and abs((spot_time - pm_time).total_seconds()) > max(30, self.config.rest_interval_seconds * 3):
+            self._rest_errors["spot"] = "equity sample time skew too large"
+            spot_value = None
+        if trading_day() != day:
+            return  # Never mix samples spanning the 09:30 boundary.
+        if self._baseline_day != day:
+            self._baseline_equity = None
+            self._baseline_at = None
+            self._baseline_day = day
+            self._baseline_components = None
+            self._legacy_baseline = None
+        pm = float(account["actualEquity"]) * self.config.pm_usd_to_usdt if account else None
+        if pm is not None and spot_value is not None:
+            self._total_equity = pm + spot_value
+            if self._baseline_equity is None:
+                self._baseline_equity = self._total_equity
+                self._baseline_at = datetime.now()
+                self._baseline_components = {"pm": pm, "spot": spot_value}
+                self._baseline_components["pmTime"] = pm_time.isoformat() if pm_time else None
+                self._baseline_components["spotTime"] = spot_time.isoformat() if spot_time else None
+                self._baseline_positions = account.get("positions", [])
+                LOGGER.info("combined equity baseline initialized account=%s day=%s time=%s", self.config.account_id, day, self._baseline_at)
+        state = {
+            "schemaVersion": 2, "equityScope": self._equity_scope,
+            "valuationCurrency": "USDT", "pmUsdToUsdt": self.config.pm_usd_to_usdt,
+            "cashFlowAdjusted": False,
+            "accountId": self.config.account_id, "tradingDay": day,
+            "baselineEquity": self._baseline_equity,
+            "baselineTime": self._baseline_at.isoformat(timespec="milliseconds") if self._baseline_at else None,
+            "baselineComponents": self._baseline_components,
+            "baselineSampleTime": self._baseline_at.isoformat() if self._baseline_at else None,
+            "baselineKind": "first_complete_sample_of_scope",
+            "previousScopeBaseline": self._legacy_baseline,
+            "latestEquity": self._total_equity,
+            "latestTime": datetime.now().isoformat(timespec="milliseconds"),
+            "pmEquity": pm, "spotEquity": spot_value,
+            "pmTime": pm_time.isoformat() if pm_time else None,
+            "spotTime": spot_time.isoformat() if spot_time else None,
+            "spotAssets": assets, "errors": dict(self._rest_errors),
+            "baselinePositions": self._baseline_positions,
+            "latestPositions": account.get("positions", []) if account else [],
+        }
+        self.store.write_equity_state(state, now=now)
 
     async def _rest_loop(self) -> None:
-        next_balance_at = 0.0
+        previous_errors = None
         while not self.stop_event.is_set():
-            started = int(time.time() * 1000)
             try:
-                account = await self.rest.get("/papi/v1/account", signed=True)
-                if self.config.include_positions:
-                    try:
-                        account["positions"] = await self.rest.get("/papi/v1/um/positionRisk", signed=True)
-                        self._positions_warned = False
-                    except Exception:
-                        if not self._positions_warned:
-                            LOGGER.warning("position snapshot unavailable account=%s", self.config.account_id, exc_info=True)
-                            self._positions_warned = True
-                now = time.monotonic()
-                if self.config.include_balance and now >= next_balance_at:
-                    try:
-                        balance = await self.rest.get("/papi/v1/balance", signed=True)
-                        account["balance"] = balance.get("data", balance)
-                        next_balance_at = now + self.config.balance_interval_seconds
-                    except Exception:
-                        LOGGER.exception("account balance poll failed")
-                self._ensure_baseline(account)
-                equity = self._equity(account)
-                if equity is not None:
-                    self.store.write_equity_state({
-                        "accountId": self.config.account_id,
-                        "tradingDay": trading_day(),
-                        "baselineEquity": self._baseline_equity,
-                        "baselineTime": self._baseline_at.isoformat(timespec="milliseconds") if self._baseline_at else None,
-                        "latestEquity": equity,
-                        "latestTime": datetime.now().isoformat(timespec="milliseconds"),
-                        "baselinePositions": getattr(self, "_baseline_positions", []),
-                        "latestPositions": account.get("positions", []),
-                    })
-                self._last_account = account
-                self._last_account_at = datetime.now()
-                self._last_error = None
+                await self._collect_equity()
+                errors = dict(self._rest_errors)
+                if errors != previous_errors:
+                    if errors:
+                        LOGGER.warning("account REST state account=%s errors=%s", self.config.account_id, errors)
+                    else:
+                        LOGGER.info("account REST ready account=%s", self.config.account_id)
+                    previous_errors = errors
             except asyncio.CancelledError:
                 raise
             except Exception:
-                LOGGER.exception("account information poll failed")
+                LOGGER.exception("equity persistence failed account=%s", self.config.account_id)
             try:
-                await asyncio.wait_for(
-                    self.stop_event.wait(), timeout=self.config.rest_interval_seconds
-                )
+                await asyncio.wait_for(self.stop_event.wait(), timeout=self.config.rest_interval_seconds)
             except asyncio.TimeoutError:
                 pass
 
@@ -411,6 +534,7 @@ class BinanceAccountMonitor:
                             continue
                         self._funding_seen.add(key)
                         self.store.append("funding.jsonl", {
+                            "exchange": "binance", "source": "rest", "accountScope": "um",
                             "recordType": "funding_income",
                             "accountId": self.config.account_id,
                             "receivedTime": datetime.now().isoformat(timespec="milliseconds"),
@@ -430,14 +554,17 @@ class BinanceAccountMonitor:
         user_task = asyncio.create_task(self.user_stream.run(self.stop_event))
         rest_task = asyncio.create_task(self._rest_loop())
         funding_task = asyncio.create_task(self._funding_loop())
+        tasks = [user_task, rest_task, funding_task]
+        if self.spot_stream is not None:
+            tasks.append(asyncio.create_task(self.spot_stream.run(self.stop_event)))
         try:
-            await asyncio.gather(user_task, rest_task, funding_task)
+            await asyncio.gather(*tasks)
         finally:
             self.stop_event.set()
-            for task in (user_task, rest_task, funding_task):
+            for task in tasks:
                 if not task.done():
                     task.cancel()
-            await asyncio.gather(user_task, rest_task, funding_task, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
             await self.rest.close()
 
     async def stop(self) -> None:
@@ -446,12 +573,23 @@ class BinanceAccountMonitor:
     def status(self) -> dict[str, Any]:
         """Small read-only state snapshot used by the terminal dashboard."""
         account = self._last_account
+        fresh = self._last_account_at is not None and (datetime.now() - self._last_account_at).total_seconds() < max(30, self.config.rest_interval_seconds * 3)
         def value(name: str) -> Any:
             return account.get(name, "-") if isinstance(account, dict) else "-"
         return {
+            "private_streams": {
+                "pm": "CONNECTED" if self.user_stream.connected else "CONNECTING",
+                "spot": ("CONNECTED" if self.spot_stream.connected else "CONNECTING") if self.spot_stream else "DISABLED",
+            },
             "account_id": self.config.account_id,
+            "spot_equity": self._spot_equity,
+            "total_equity": self._total_equity if fresh else None,
+            "actual_profit": self._total_equity - self._baseline_equity if fresh and self._total_equity is not None and self._baseline_equity is not None else None,
+            "spot_at": self._spot_at,
+            "rest_errors": dict(self._rest_errors),
+            "stream_errors": {k:v for k,v in self._stream_errors.items() if not (self.user_stream.connected if k == "pm_stream" else self.spot_stream and self.spot_stream.connected)},
             "account_equity": value("accountEquity"),
-            "actual_equity": value("actualEquity"),
+            "actual_equity": float(account["actualEquity"]) * self.config.pm_usd_to_usdt if account.get("actualEquity") is not None else None,
             "available": value("totalAvailableBalance"),
             "unimmr": value("uniMMR"),
             "account_at": self._last_account_at,
@@ -493,9 +631,19 @@ def load_config(path: Path) -> AccountMonitorConfig:
         # Account files live under config/, while runtime data belongs beside
         # config/ at the project root.
         output_dir = path.parent.parent / output_dir
+    spot_values = values.get("spot", {})
+    spot_credentials = None
+    if spot_values.get("api_key") or spot_values.get("secret_key"):
+        if not spot_values.get("api_key") or not spot_values.get("secret_key"):
+            raise ValueError("spot.api_key and spot.secret_key must be supplied together")
+        spot_credentials = BinanceCredentials(spot_values["api_key"], spot_values["secret_key"], label=credentials.label)
     return AccountMonitorConfig(
         account_id=str(values.get("account_id", "account")),
         credentials=credentials,
+        spot_enabled=bool(spot_values.get("enabled", True)),
+        spot_credentials=spot_credentials,
+        proxy=values.get("proxy"),
+        pm_usd_to_usdt=float(values.get("pm_usd_to_usdt", 1.0)),
         output_dir=output_dir,
         rest_interval_seconds=float(values.get("rest_interval_seconds", 5.0)),
         include_balance=bool(values.get("include_balance", True)),

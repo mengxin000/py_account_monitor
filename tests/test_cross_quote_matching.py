@@ -14,6 +14,44 @@ from reports.report_data import load_report_data
 
 
 class CrossQuoteMatchingTest(unittest.TestCase):
+    def test_partial_fill_fees_flow_through_unmatched_and_exposure_residual(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            day_dir = Path(temp_dir)
+            rows = [
+                {"data": {"e": "ORDER_TRADE_UPDATE", "E": 1_000, "fs": "UM", "o": {
+                    "s": "AAVEUSDT", "c": "buy-order", "S": "BUY", "X": "PARTIALLY_FILLED",
+                    "i": 1, "z": "0.3", "L": "100", "n": "0.03", "N": "USDT", "T": 1_000,
+                }}},
+                {"data": {"e": "ORDER_TRADE_UPDATE", "E": 1_001, "fs": "UM", "o": {
+                    "s": "AAVEUSDT", "c": "buy-order", "S": "BUY", "X": "FILLED",
+                    "i": 1, "z": "1.0", "L": "100", "n": "0.07", "N": "USDT", "T": 1_001,
+                }}},
+                {"data": {"e": "ORDER_TRADE_UPDATE", "E": 700_002, "fs": "UM", "o": {
+                    "s": "AAVEUSDT", "c": "unrelated-sell", "S": "SELL", "X": "FILLED",
+                    "i": 2, "z": "0.4", "L": "101", "n": "0.04", "N": "USDT", "T": 700_002,
+                }}},
+            ]
+            (day_dir / "trade_callbacks.jsonl").write_text(
+                "".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8"
+            )
+
+            replay_day(day_dir)
+
+            unmatched = [json.loads(line) for line in (day_dir / "unmatched.jsonl").read_text(encoding="utf-8").splitlines()]
+            buy_unmatched = next(row for row in unmatched if row["side"] == "BUY")
+            self.assertAlmostEqual(buy_unmatched["quantity"], 1.0)
+            self.assertAlmostEqual(buy_unmatched["fee"], 0.10)
+
+            exposure = json.loads((day_dir / "exposure_matches.jsonl").read_text(encoding="utf-8"))
+            self.assertAlmostEqual(exposure["quantity"], 0.4)
+            self.assertAlmostEqual(exposure["buy_fee"], 0.04)
+            self.assertAlmostEqual(exposure["sell_fee"], 0.04)
+
+            remains = [json.loads(line) for line in (day_dir / "exposure_remain.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(remains), 1)
+            self.assertAlmostEqual(remains[0]["quantity"], 0.6)
+            self.assertAlmostEqual(remains[0]["fee"], 0.06)
+
     def test_adverse_slippage_uses_signed_spreads_and_futures_side(self) -> None:
         for side, quoted, actual, expected in [
             ("SELL", -0.0004, -0.0001, False),

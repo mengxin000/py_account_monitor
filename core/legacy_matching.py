@@ -36,11 +36,11 @@ def quoted_spread_from_client_id(client_id: str, market_type: str) -> float | No
     """Decode the value after the third ``_`` in ORDER_TRADE_UPDATE ``c``."""
     if market_type != "futures":
         return None
-    parts = client_id.split("_", 3)
-    if len(parts) != 4:
+    parts = client_id.rsplit("_", 1)
+    if len(parts) != 2:
         return None
     try:
-        return int(parts[3]) / 100_000.0
+        return int(parts[1]) / 100_000.0
     except ValueError:
         return None
 
@@ -59,6 +59,13 @@ class MatchOrder:
     fill_time: int = 0
     symbol: str = ""
     market_type: str = ""  # spot (executionReport) or futures (ORDER_TRADE_UPDATE)
+    exchange: str = "binance"
+    account_id: str = ""
+    account_scope: str = "unknown"
+
+    @property
+    def identity(self):
+        return (self.exchange, self.account_id, self.account_scope, self.market_type, self.symbol, self.system_id)
 
 
 @dataclass(frozen=True)
@@ -102,7 +109,7 @@ class LegacyMatcher:
     def __init__(
         self,
         *,
-        timeout_ms: int = 10_000,
+        timeout_ms: int = 600_000,
         on_match: Callable[[MatchRecord], Any] | None = None,
     ) -> None:
         self.timeout_ms = timeout_ms
@@ -142,6 +149,9 @@ class LegacyMatcher:
             fee = raw_fee
 
         return MatchOrder(
+            exchange=str(event.get("exchange", "binance")),
+            account_id=str(event.get("accountId", "")),
+            account_scope=str(event.get("accountScope", "unknown")),
             id=str(value("c", "clientOrderId", default="")),
             system_id=str(value("i", "orderId", default="")),
             side=str(value("S", "side", default="")),
@@ -171,7 +181,7 @@ class LegacyMatcher:
         with self._lock:
             if current.status == "PARTIALLY_FILLED":
                 for old in self.no_save_orders:
-                    if old.system_id == current.system_id:
+                    if old.identity == current.identity:
                         old.status = current.status
                         old.quantity = current.quantity
                         old.price = current.price
@@ -186,11 +196,16 @@ class LegacyMatcher:
                 return []
             accumulated = 0.0
             for index, old in enumerate(self.no_save_orders):
-                if old.system_id == current.system_id:
+                if old.identity == current.identity:
                     accumulated = old.fee
                     self.no_save_orders.pop(index)
                     break
-            return self.process_completed(current, extra_fee=extra_fee + accumulated)
+            # Binance's ``n`` is the commission of this individual fill while
+            # ``z`` is cumulative executed quantity.  Carry the sum of every
+            # partial-fill commission into the terminal order instead of
+            # leaving only the last callback's commission on a residual.
+            current.fee += accumulated
+            return self.process_completed(current, extra_fee=extra_fee)
 
     def process_completed(self, current: MatchOrder, *, extra_fee: float = 0.0) -> list[MatchRecord]:
         """Match an incoming (later) order against queued (earlier) match orders.
@@ -203,6 +218,7 @@ class LegacyMatcher:
         output: list[MatchRecord] = []
         with self._lock:
             order_qty = current.quantity
+            current_fee_remaining = current.fee + extra_fee
             flag = False
             consumed_previous = False
             index = 0
@@ -211,12 +227,17 @@ class LegacyMatcher:
                 if not is_matching_order(current.id, current.system_id, queued_order.system_id, queued_order.id):
                     index += 1
                     continue
-                old_fee = 0.0 if queued_order.flage == 1 else queued_order.fee
-                current_fee = 0.0 if consumed_previous else current.fee
                 min_qty = min(order_qty, queued_order.quantity)
+                queued_qty_before = queued_order.quantity
+                current_qty_before = order_qty
+                # ``fee`` always represents the commission still attached to
+                # the remaining quantity. Allocate it proportionally whenever
+                # only part of an order is consumed.
+                old_fee = queued_order.fee * (min_qty / queued_qty_before) if queued_qty_before else 0.0
+                current_fee = current_fee_remaining * (min_qty / current_qty_before) if current_qty_before else 0.0
                 sell_price = queued_order.price if queued_order.side == "SELL" else current.price
                 buy_price = queued_order.price if queued_order.side == "BUY" else current.price
-                profit = (sell_price - buy_price) * min_qty - current_fee - old_fee - extra_fee
+                profit = (sell_price - buy_price) * min_qty - current_fee - old_fee
                 # Cross-market spread ratio: futures price is the denominator.  current->hedge
                 if queued_order.market_type == "futures" and current.market_type == "spot":
                     futures_price, spot_price = queued_order.price, current.price
@@ -243,7 +264,7 @@ class LegacyMatcher:
                     current_price=queued_order.price,
                     match_price=current.price,
                     current_fee=old_fee,
-                    match_fee=current_fee + extra_fee,
+                    match_fee=current_fee,
                     profit=profit,
                     offset=offset,
                     event_time_ms=current.time_ms,
@@ -260,12 +281,14 @@ class LegacyMatcher:
                 if self.on_match:
                     self.on_match(record)
 
+                queued_order.fee -= old_fee
+                current_fee_remaining -= current_fee
                 if queued_order.quantity > order_qty - 1e-8:
                     if abs(order_qty - queued_order.quantity) < 1e-8:
                         self.match_orders.pop(index)
                     else:
                         queued_order.quantity -= order_qty
-                        queued_order.flage = 1
+                    order_qty = 0.0
                     flag = True
                     break
                 order_qty -= queued_order.quantity
@@ -276,16 +299,17 @@ class LegacyMatcher:
             if not flag:
                 updated = False
                 for old in self.match_orders:
-                    if old.system_id == current.system_id:
+                    if old.identity == current.identity:
                         old.status = current.status
                         old.quantity = current.quantity
                         old.price = current.price
-                        old.fee = current.fee
+                        old.fee = current_fee_remaining
                         old.time_ms = current.time_ms
                         updated = True
                         break
                 if not updated:
                     current.quantity = order_qty
+                    current.fee = current_fee_remaining
                     current.flage = 1 if consumed_previous else current.flage
                     self.match_orders.append(current)
         return output
@@ -329,8 +353,9 @@ class LegacyMatcher:
                     continue
                 qty = min(buy.quantity, remain_buy)
                 buy_sum += buy.price * qty
-                if buy.flage == 0:
-                    buy_fee += buy.fee * (qty / buy.quantity)
+                allocated_fee = buy.fee * (qty / buy.quantity)
+                buy_fee += allocated_fee
+                buy.fee -= allocated_fee
                 buy.quantity -= qty
                 remain_buy -= qty
                 if buy.quantity < 1e-8:
@@ -342,8 +367,9 @@ class LegacyMatcher:
                     continue
                 qty = min(sell.quantity, remain_sell)
                 sell_sum += sell.price * qty
-                if sell.flage == 0:
-                    sell_fee += sell.fee * (qty / sell.quantity)
+                allocated_fee = sell.fee * (qty / sell.quantity)
+                sell_fee += allocated_fee
+                sell.fee -= allocated_fee
                 sell.quantity -= qty
                 remain_sell -= qty
                 if sell.quantity < 1e-8:
