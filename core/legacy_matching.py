@@ -21,6 +21,8 @@ def is_matching_order(
     match_client_id: str,
 ) -> bool:
     """Exact equivalent of C++ ``isMatchingOrder``."""
+    if "exposure" in current_id or "exposure" in match_client_id:
+        return False
     if (match_system_id and match_system_id in current_id) or (
         system_id and system_id in match_client_id
     ):

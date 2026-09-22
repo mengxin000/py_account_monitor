@@ -20,18 +20,25 @@ class MarketStore:
         self.retention_days = max(1, retention_days)
 
     def write(self, market: str, symbol: str, record: dict, metadata: bool = False):
-        if market not in {"spot", "futures"} or not re.fullmatch(r"[A-Z0-9_]+", symbol):
-            raise ValueError("invalid market archive key")
-        moment = datetime.fromtimestamp(record["receivedTimeMs"] / 1000)
-        directory = self.root / moment.strftime("%Y%m%d") / market / symbol
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / ("windows.jsonl" if metadata else moment.strftime("%H.jsonl"))
-        payload = json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n"
-        # Late window flushes may refer to an already compressed hour.
-        compressed = path.with_suffix(".jsonl.gz")
-        opener = gzip.open if compressed.exists() else open
-        with opener(compressed if compressed.exists() else path, "at", encoding="utf-8") as stream:
-            stream.write(payload)
+        self.write_batch([(market, symbol, record, metadata)])
+
+    def write_batch(self, records):
+        grouped = {}
+        for market, symbol, record, metadata in records:
+            if market not in {"spot", "futures"} or not re.fullmatch(r"[A-Z0-9_]+", symbol):
+                raise ValueError("invalid market archive key")
+            # Bucket using capture time, never writer/parse time.
+            micros = record.get("receivedTimeUs", record["receivedTimeMs"] * 1000)
+            moment = datetime.fromtimestamp(micros // 1_000_000)
+            directory = self.root / moment.strftime("%Y%m%d") / market / symbol
+            path = directory / ("windows.jsonl" if metadata else moment.strftime("%H.jsonl"))
+            grouped.setdefault(path, []).append(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+        for path, lines in grouped.items():
+            path.parent.mkdir(parents=True, exist_ok=True)
+            compressed = path.with_suffix(".jsonl.gz")
+            opener = gzip.open if compressed.exists() else open
+            with opener(compressed if compressed.exists() else path, "at", encoding="utf-8") as stream:
+                stream.writelines(lines)
 
     def maintain(self, now: datetime | None = None):
         now = now or datetime.now()

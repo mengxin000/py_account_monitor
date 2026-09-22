@@ -5,6 +5,10 @@ import asyncio
 import logging
 import re
 import time
+import json
+import queue as ipc_queue
+import uuid
+from .market_ingress import stamp, launch, take_batch
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +33,7 @@ class StreamState:
     orders: set = field(default_factory=set)
     idle_since: float = 0
     until: float = 0
+    since: float = float("inf")
     written: int = 0
     sequence: int = 0
     task: asyncio.Task | None = None
@@ -40,6 +45,8 @@ class MarketCollector:
         self.enabled = bool(config.get("enabled", True))
         self.proxy = config.get("proxy")
         self.connection_states = {}
+        self.raw_sink = None
+        self.ingress_capacity = max(1, int(config.get("ingress_queue_max", 50000)))
         self.before = max(0, float(config.get("buffer_seconds", 30)))
         self.after = max(0, float(config.get("post_fill_seconds", 10)))
         self.idle = max(1, float(config.get("unsubscribe_idle_seconds", 60)))
@@ -79,6 +86,7 @@ class MarketCollector:
             self.dropped_quotes += 1
             if self.dropped_quotes == 1 or self.dropped_quotes % 1000 == 0:
                 LOGGER.warning("market archive quote queue full; oldest quotes evicted count=%d", self.dropped_quotes)
+                self.critical_queue.put_nowait((*key, {"kind":"archive_overflow", "receivedTimeMs":time.time_ns()//1_000_000, "droppedTotal":self.dropped_quotes}, True))
             return True
 
     def ensure(self, key, now):
@@ -123,6 +131,7 @@ class MarketCollector:
             state.idle_since = now
         if order.get("x") == "TRADE" and float(order.get("l", 0) or 0) > 0:
             self.trim(state, now)
+            state.since = min(state.since, now - self.before) if now - self.before <= state.until else now - self.before
             state.until = max(state.until, now + self.after)
             self.emit(key, {
                 "kind": "fill_window", "receivedTimeMs": int(now * 1000),
@@ -139,7 +148,7 @@ class MarketCollector:
                         break
                     state.written = quote["sequence"]
 
-    def quote_event(self, key, event, now=None):
+    def quote_event(self, key, event, now=None, envelope=None):
         now = time.time() if now is None else now
         state = self.states[key]
         if not all(field in event for field in ("b", "B", "a", "A")):
@@ -149,10 +158,81 @@ class MarketCollector:
                  "transactionTimeMs": event.get("T"), "updateId": event.get("u"),
                  "sequence": state.sequence, "bidPrice": event["b"], "bidQty": event["B"],
                  "askPrice": event["a"], "askQty": event["A"]}
+        if envelope is not None:
+            quote.update(envelope)
+            quote["receivedTimeMs"] = envelope["receivedTimeUs"] // 1000
+            quote["processedMonoNs"] = time.perf_counter_ns()
         self.trim(state, now)
         state.quotes.append(quote)
-        if now <= state.until and self.emit(key, quote):
+        if state.since <= now <= state.until and self.emit(key, quote):
             state.written = state.sequence
+
+    def ingest_raw(self, market, envelope):
+        if "metadata" in envelope:
+            record = envelope["metadata"]
+            kind = record.get("kind")
+            if kind in {"connected", "disconnected"}:
+                self.connection_states[market] = "CONNECTED" if kind == "connected" else "RECONNECTING"
+                LOGGER.log(logging.WARNING if kind == "disconnected" else logging.INFO,
+                           "market receiver market=%s state=%s error=%s", market, kind, record.get("error", ""))
+            self.emit((market, envelope["symbol"]), record, True)
+            return
+        try:
+            payload = json.loads(envelope["rawPayload"])
+            event = payload.get("data", payload)
+            key = market, str(event.get("s", "")).upper()
+            if key in self.states:
+                self.quote_event(key, event, envelope["receivedTimeUs"] / 1_000_000, envelope)
+        except (ValueError, TypeError, AttributeError):
+            LOGGER.warning("invalid market payload market=%s connection=%s sequence=%s", market, envelope.get("connectionId"), envelope.get("receiveSequence"))
+
+    async def isolated_stream(self, market):
+        process, commands, output, stop, drops = launch(market, self.store.root, self.proxy, self.ingress_capacity)
+        desired_previous = None
+        last_drops = 0
+        self.connection_states[market] = "CONNECTING"
+        try:
+            while not self.stopping:
+                desired = sorted(symbol for m, symbol in self.states if m == market)
+                if desired != desired_previous:
+                    try:
+                        commands.put_nowait(desired)
+                        desired_previous = desired
+                    except ipc_queue.Full:
+                        pass
+                for record in await asyncio.to_thread(take_batch, output):
+                    self.ingest_raw(market, record)
+                if drops.value != last_drops:
+                    last_drops = drops.value
+                    LOGGER.warning("market ingress overflow market=%s dropped_total=%s", market, last_drops)
+                    for symbol in desired:
+                        self.emit((market,symbol), {"kind":"ingress_overflow", "receivedTimeMs":time.time_ns()//1_000_000, "droppedTotal":last_drops}, True)
+                if not process.is_alive():
+                    raise RuntimeError(f"market receiver exited code={process.exitcode}")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            LOGGER.exception("isolated market receiver failed market=%s", market)
+            await asyncio.sleep(3)
+        finally:
+            stop.set()
+            deadline = time.monotonic() + 3
+            while process.is_alive() and time.monotonic() < deadline:
+                for record in await asyncio.to_thread(take_batch, output):
+                    self.ingest_raw(market, record)
+            forced = process.is_alive()
+            if forced:
+                process.terminate()
+                LOGGER.warning("market receiver forced shutdown market=%s; queued records may be lost", market)
+            await asyncio.to_thread(process.join, 2)
+            if not forced:
+                for record in await asyncio.to_thread(take_batch, output):
+                    self.ingest_raw(market, record)
+            for channel in (commands, output):
+                channel.cancel_join_thread()
+                channel.close()
+            process.close()
+            self.connection_states[market] = "IDLE"
 
     async def stream(self, market):
         """Maintain one dynamically subscribed bookTicker socket per market."""
@@ -165,6 +245,8 @@ class MarketCollector:
                 async with self.connect_lock:
                     await asyncio.sleep(1.1)
                 async with self.session.ws_connect(url, heartbeat=20, proxy=self.proxy) as ws:
+                    connection_id = uuid.uuid4().hex
+                    receive_sequence = 0
                     self.connection_states[market] = "CONNECTED"
                     subscribed: set[str] = set()
                     pending: dict[int, tuple[str, set[str]]] = {}
@@ -208,6 +290,10 @@ class MarketCollector:
                         except asyncio.TimeoutError:
                             continue
                         if msg.type == aiohttp.WSMsgType.TEXT:
+                            receive_sequence += 1
+                            envelope = stamp(msg.data, connection_id, receive_sequence)
+                            if self.raw_sink is not None:
+                                self.raw_sink(envelope)
                             payload = msg.json()
                             response_id = payload.get("id")
                             if response_id in pending and "result" in payload:
@@ -239,7 +325,7 @@ class MarketCollector:
                             symbol = str(event.get("s", "")).upper()
                             key = (market, symbol)
                             if key in self.states:
-                                self.quote_event(key, event)
+                                self.quote_event(key, event, now=envelope["receivedTimeUs"] / 1_000_000, envelope=envelope)
                         elif msg.type == aiohttp.WSMsgType.ERROR:
                             raise RuntimeError(str(ws.exception()))
                         elif msg.type in {aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.CLOSING}:
@@ -337,7 +423,16 @@ class MarketCollector:
                     return
                 continue
             try:
-                await asyncio.to_thread(self.store.write, *item)
+                batch = [item]
+                for _ in range(255):
+                    try:
+                        following = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
+                    if following is not None:
+                        batch.append(following)
+                    queue.task_done()
+                await asyncio.to_thread(self.store.write_batch, batch)
                 if time.monotonic() - last_maintenance > 60:
                     await asyncio.to_thread(self.store.maintain)
                     last_maintenance = time.monotonic()
@@ -372,7 +467,7 @@ class MarketCollector:
                         active = any(current_market == market for current_market, _ in self.states)
                         task = self.market_tasks.get(market)
                         if active and (task is None or task.done()):
-                            self.market_tasks[market] = asyncio.create_task(self.stream(market))
+                            self.market_tasks[market] = asyncio.create_task(self.isolated_stream(market))
                         elif not active and task is not None:
                             task.cancel()
                             await asyncio.gather(task, return_exceptions=True)

@@ -25,7 +25,7 @@ package = true
 [tool.hatch.build.targets.wheel]
 # Explicit selection keeps source code and configuration in the wheel while
 # excluding local credentials, runtime JSONL and generated reports.
-only-include = ["__init__.py", "connections", "core", "collectors", "replay", "cli", "config", "reports", "service", "storage"]
+only-include = ["__init__.py", "connections", "core", "collectors", "replay", "cli", "config", "reports", "service", "storage", "realtime", "web"]
 
 [tool.hatch.build.targets.wheel.sources]
 "." = "python_binance"

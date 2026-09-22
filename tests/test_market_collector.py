@@ -34,7 +34,7 @@ class MarketTests(unittest.TestCase):
             collector.emit(key, {"kind": "fill_window"}, True)
             self.assertEqual(collector.market_queue.qsize(), 1)
             self.assertEqual(collector.market_queue._queue[0][2]["sequence"], 2)
-            self.assertEqual(collector.critical_queue.qsize(), 1)
+            self.assertEqual(collector.critical_queue.qsize(), 2)  # fill + overflow audit
             self.assertEqual(collector.dropped_quotes, 1)
 
     def test_shared_orders_window_union_capacity_and_cancel(self):
@@ -102,6 +102,7 @@ class LifecycleTests(unittest.IsolatedAsyncioTestCase):
                 type = aiohttp.WSMsgType.TEXT
                 def __init__(self, payload):
                     self.payload = payload
+                    self.data = json.dumps(payload)
                 def json(self):
                     return self.payload
 

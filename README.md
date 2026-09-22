@@ -1,5 +1,10 @@
 # Binance 多账户监控
 
+## 只读实时网页
+
+新增独立实时配对、共享15档盘口、账户挂单叠加、分页明细与日报下载；原分析和邮件流程不变。默认不开启匿名访问，配置后仍用原来的 `uv run binance-monitor` 一次启动。
+本地使用及Vercel前端部署参见 [web/README.md](web/README.md)。
+
 ## 公共最优报价采集
 
 使用原启动命令 `uv run binance-monitor`。`config/accounts.local.json` 的

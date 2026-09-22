@@ -189,6 +189,8 @@ async def run(service_path: Path) -> None:
     tasks.append(asyncio.create_task(_report_loop(monitors, email_path, interval, first_delay, service_path.parent.parent, report_state)))
     tasks.append(asyncio.create_task(_final_day_report_loop(monitors, email_path, service_path.parent.parent)))
     tasks.append(asyncio.create_task(_dashboard(monitors, report_state)))
+    from .web_service import supervise
+    tasks.append(asyncio.create_task(supervise(monitors, service_path.parent.parent, service_config.get("web", {}), market_settings.get("proxy"))))
     try:
         await asyncio.gather(*tasks)
     finally:
