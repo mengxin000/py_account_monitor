@@ -6,7 +6,7 @@ const el = (tag, text, cls) => { const n = document.createElement(tag); if(text 
 const number = (v, digits = 4) => v == null || v === "-" || !Number.isFinite(Number(v)) ? "—" : Number(v).toLocaleString("en-US", {minimumFractionDigits:digits, maximumFractionDigits:digits});
 const clock = v => v ? new Date(v).toLocaleTimeString("zh-CN", {hour12:false}) : "—";
 const legs = () => [0,1].map(i => ({market:$("market"+i).value,symbol:$("symbol"+i).value.trim().toUpperCase()}));
-$("backend").value = localStorage.getItem("monitorBackend") || location.origin;
+$("backend").value = location.protocol === "http:" ? location.origin : (localStorage.getItem("monitorBackend") || location.origin);
 async function api(path, options = {}) {
   const response = await fetch(base + path, {...options, headers:{"Authorization":"Bearer "+token, ...(options.headers || {})}});
   if(!response.ok) throw new Error(response.status === 401 ? "登录已过期或凭证错误，请重新登录" : "请求失败 ("+response.status+")");
@@ -17,10 +17,7 @@ function warning(text) { $("warning").textContent=text; $("warning").hidden=!tex
 $("loginForm").addEventListener("submit", async event => {
   event.preventDefault(); $("loginError").textContent="";
   try {
-    const url = new URL($("backend").value.trim());
-    if(!["http:","https:"].includes(url.protocol) || url.username || url.password) throw new Error("请输入 HTTP / HTTPS 后端地址");
-    if(url.protocol !== "https:" && !["localhost","127.0.0.1","[::1]"].includes(url.hostname)) throw new Error("远程后端必须使用 HTTPS");
-    base=url.origin;
+    base=monitorBackendOrigin($("backend").value.trim(),location.origin);
     const data=await (await api("/api/login",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({username:$("username").value,password:$("password").value})})).json();
     token=data.token; $("password").value=""; localStorage.setItem("monitorBackend",base);
     $("account").replaceChildren(...data.accounts.map(a => {const o=el("option",a);o.value=a;return o;}));
