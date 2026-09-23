@@ -213,12 +213,61 @@ def make_app(live,config):
                 if market not in {"spot","um"} or not re.fullmatch(r"[A-Z0-9]{2,30}",symbol): return ws
                 keys.append((market,symbol))
             live.watchers[key]=set(keys)
+            incremental = hello.get("protocol") == 2
+            subscription = hello.get("subscription", 0)
+            previous = {}
+            pending = None
+            sequence = 0
+            sent_at = 0
+            round_trip_ms = None
             async def receive():
+                nonlocal account, keys, subscription, previous, pending, round_trip_ms
                 async for message in ws:
                     if message.type==WSMsgType.ERROR: break
+                    if message.type != WSMsgType.TEXT: continue
+                    data = json.loads(message.data)
+                    if not isinstance(data, dict): break
+                    if data.get("type") == "ack":
+                        if data.get("sequence") == pending:
+                            round_trip_ms = round((time.monotonic()-sent_at)*1000)
+                            pending = None
+                    elif data.get("type") == "subscribe":
+                        selected = data.get("account")
+                        if selected not in session[1]: break
+                        selected_keys = []
+                        selected_legs = data.get("legs", [])
+                        if not isinstance(selected_legs, list): return
+                        for leg in selected_legs[:2]:
+                            if not isinstance(leg, dict): return
+                            market, symbol = leg.get("market"), str(leg.get("symbol", "")).upper()
+                            if market not in {"spot", "um"} or not re.fullmatch(r"[A-Z0-9]{2,30}", symbol):
+                                return
+                            selected_keys.append((market, symbol))
+                        account, keys = selected, selected_keys
+                        subscription = data.get("subscription", 0)
+                        previous = {}
+                        live.watchers[key] = set(keys)
             reader=asyncio.create_task(receive())
             while not ws.closed and not reader.done() and sessions.get(token,(0,))[0]>time.time():
-                await asyncio.wait_for(ws.send_json(live.snapshot(account,keys)),2)
+                if not incremental:
+                    await asyncio.wait_for(ws.send_json(live.snapshot(account,keys)),2)
+                elif pending is None:
+                    snapshot = live.snapshot(account,keys)
+                    snapshot.pop("recentTrades", None)  # Available through the paginated endpoint.
+                    snapshot.pop("serverTime", None)
+                    changed = {k:v for k,v in snapshot.items() if previous.get(k) != v or k not in previous}
+                    if changed or time.monotonic() - sent_at > 5:
+                        sequence += 1
+                        pending = sequence
+                        sent_subscription = subscription
+                        sent_at = time.monotonic()
+                        await asyncio.wait_for(ws.send_json({"type":"update", "subscription":subscription,
+                            "sequence":sequence, "roundTripMs":round_trip_ms,
+                            "reset":not previous, "data":changed}), 2)
+                        if subscription == sent_subscription:
+                            previous = json.loads(json.dumps(snapshot))
+                elif time.monotonic() - sent_at > 30:
+                    break  # Bound in-flight snapshots: never queue historical books for a slow viewer.
                 await asyncio.sleep(.25)
         except (asyncio.TimeoutError,ConnectionError,ValueError,RuntimeError): pass
         finally:

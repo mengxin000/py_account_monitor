@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import queue
@@ -171,6 +172,31 @@ class WebTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(trading_day(),"20260921")
             date.now.return_value=datetime(2026,9,22,9,30)
             self.assertEqual(trading_day(),"20260922")
+
+    async def test_incremental_latest_only_switch_and_permissions(self):
+        token=await self.login()
+        ws=await self.client.ws_connect("/api/live")
+        await ws.send_json({"token":token,"protocol":2,"subscription":0,"account":"zdl","legs":[]})
+        first=await ws.receive_json(timeout=2)
+        self.assertTrue(first["reset"])
+        self.assertNotIn("recentTrades",first["data"])
+        self.live.statuses["zdl"]={"asOf":1,"data":{"total_equity":10}}
+        await asyncio.sleep(.6)
+        self.live.statuses["zdl"]={"asOf":1,"data":{"total_equity":20}}
+        await ws.send_json({"type":"ack","sequence":first["sequence"]})
+        second=await ws.receive_json(timeout=2)
+        self.assertEqual(second["data"]["status"]["total_equity"],20)
+        self.assertNotIn("orders",second["data"])
+        await ws.send_json({"type":"subscribe","subscription":1,"account":"zdl","legs":[{"market":"um","symbol":"AAVEUSDC"}]})
+        await ws.send_json({"type":"ack","sequence":second["sequence"]})
+        switched=await ws.receive_json(timeout=2)
+        self.assertEqual(switched["subscription"],1)
+        self.assertTrue(switched["reset"])
+        self.assertEqual(switched["data"]["books"][0]["symbol"],"AAVEUSDC")
+        await ws.send_json({"type":"subscribe","subscription":2,"account":"dh","legs":[]})
+        message=await ws.receive(timeout=2)
+        self.assertNotEqual(message.type,1)  # No unauthorized account data.
+        await ws.close()
 
 
 if __name__=="__main__":unittest.main()
