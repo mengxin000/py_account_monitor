@@ -5,6 +5,13 @@ let subscription = 0, rowsKey = "", metricsKey = "", tableKey = "";
 const el = (tag, text, cls) => { const n = document.createElement(tag); if(text != null) n.textContent = text; if(cls) n.className = cls; return n; };
 const number = (v, digits = 4) => v == null || v === "-" || !Number.isFinite(Number(v)) ? "—" : Number(v).toLocaleString("en-US", {minimumFractionDigits:digits, maximumFractionDigits:digits});
 const clock = v => v ? new Date(v).toLocaleTimeString("zh-CN", {hour12:false}) : "—";
+// Pad exchange decimal strings without converting through floating point or truncating precision.
+const tradeDecimal = v => {
+  if(v == null || v === "") return "—";
+  const text = String(v);
+  const match = /^([+-]?\d+)(?:\.(\d*))?$/.exec(text);
+  return match ? match[1]+"."+(match[2]||"").padEnd(8,"0") : text;
+};
 const fillTime = v => {
   if(v == null) return "—";
   const date = new Date(Number(v));
@@ -125,7 +132,7 @@ const columns={
 };
 function cells(row) {
   if(kind==="orders") return [row.scope,row.symbol,row.side,row.price,number(row.remaining),row.clientId];
-  if(kind==="recentTrades") {const e=row.data||row,o=typeof e.o==="object"?e.o:e; return [clock(o.T||e.T),row.accountScope||e.fs||"—",o.s,o.S,o.l,o.L,(o.n||"0")+" / "+(o.N||"—")];}
+  if(kind==="recentTrades") {const e=row.data||row,o=typeof e.o==="object"?e.o:e; return [clock(o.T||e.T),row.accountScope||e.fs||"—",o.s,o.S,tradeDecimal(o.l),tradeDecimal(o.L),tradeDecimal(o.n)+" / "+(o.N||"—")];}
   if(kind==="matches") {
     const order=String(row.current_symbol||"").toUpperCase(),hedge=String(row.match_symbol||"").toUpperCase();
     const pair=order&&hedge?order+"_"+hedge:order||hedge;

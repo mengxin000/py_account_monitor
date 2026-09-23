@@ -268,7 +268,7 @@ def make_app(live,config):
                             previous = json.loads(json.dumps(snapshot))
                 elif time.monotonic() - sent_at > 30:
                     break  # Bound in-flight snapshots: never queue historical books for a slow viewer.
-                await asyncio.sleep(.25)
+                await asyncio.sleep(1)
         except (asyncio.TimeoutError,ConnectionError,ValueError,RuntimeError): pass
         finally:
             if reader:

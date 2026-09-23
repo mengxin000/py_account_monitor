@@ -9,6 +9,18 @@ const context=vm.createContext({
   location:{origin:'http://localhost:8080',protocol:'http:'},setInterval(){}
 });
 vm.runInContext(fs.readFileSync(path.join(root,'web/frontend/static/app.js'),'utf8'),context);
+test('trade decimals pad UM and Spot consistently without losing source precision',()=>{
+  for(const [value,expected] of [['0.26','0.26000000'],['117.04','117.04000000'],['3','3.00000000'],['0.26000000','0.26000000'],['0.000000001234','0.000000001234'],[null,'—']]) {
+    assert.equal(vm.runInContext(`tradeDecimal(${JSON.stringify(value)})`,context),expected);
+  }
+  for(const eventType of ['ORDER_TRADE_UPDATE','executionReport']) {
+    const order={s:'SOLUSDT',S:'SELL',l:'0.26',L:'117.04',n:'0.00121721',N:'USDT'};
+    const event=eventType==='ORDER_TRADE_UPDATE'?{e:eventType,o:order}:{e:eventType,...order};
+    const result=JSON.parse(vm.runInContext(`kind='recentTrades';JSON.stringify(cells(${JSON.stringify({data:event})}))`,context));
+    assert.equal(result[4],'0.26000000');assert.equal(result[5],'117.04000000');
+    assert.equal(result[6],'0.00121721 / USDT');
+  }
+});
 test('columns match Excel with only slippage inserted after direction',()=>{
   const source=fs.readFileSync(path.join(root,'reports/excel_report.py'),'utf8');
   const headers=JSON.parse(source.match(/ORDER_HEADERS = (\[[\s\S]*?\])/)[1].replace(/,\s*]/,']'));
