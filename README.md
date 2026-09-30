@@ -1,6 +1,6 @@
 # 监控程序
 
-本地部署按照`启动步骤`标题下的步骤实施即可
+本地部署按照`启动步骤`标题下的步骤实施
 
 ## 环境
 
@@ -88,14 +88,14 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 
 windows:
 ```powershell
-cd python_binance
+cd py_account_monitor
 Copy-Item config/account_zdl.local.example.json config/account_zdl.local.json
 Copy-Item config/account_mfx.local.example.json config/account_mfx.local.json
 Copy-Item config/account_dh.local.example.json config/account_dh.local.json
 ```
 linux:
 ```powershell
-cd python_binance
+cd py_account_monitor
 cp config/account_zdl.local.example.json config/account_zdl.local.json
 cp config/account_mfx.local.example.json config/account_mfx.local.json
 cp config/account_dh.local.example.json config/account_dh.local.json
