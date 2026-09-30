@@ -67,24 +67,39 @@ runtime/
 
 推荐使用uv环境
 
+克隆项目，安装uv
+
+windows:
+```powershell
 git clone https://github.com/mengxin000/py_account_monitor.git
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
 
-安装uv
-
+linux
+```powershell
+git clone https://github.com/mengxin000/py_account_monitor.git
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 ## 配置
 
 每个账户一个配置文件，凭证直接放在账户文件中：
 
 以三个账户为例
 
+windows:
 ```powershell
-
 cd python_binance
 Copy-Item config/account_zdl.local.example.json config/account_zdl.local.json
 Copy-Item config/account_mfx.local.example.json config/account_mfx.local.json
 Copy-Item config/account_dh.local.example.json config/account_dh.local.json
 ```
-
+linux:
+```powershell
+cd python_binance
+cp config/account_zdl.local.example.json config/account_zdl.local.json
+cp config/account_mfx.local.example.json config/account_mfx.local.json
+cp config/account_dh.local.example.json config/account_dh.local.json
+```
 分别编辑三个文件，填写 `api_key`、`secret_key`、`subaccount_email(可以跳过)、spot.mode和futures.mode`。
 API Key 只需读取和用户数据权限。
 
@@ -129,10 +144,18 @@ API Key 只需读取和用户数据权限。
 
 ## 创建多账户总配置和邮件配置：
 
+windows:
 ```powershell
 Copy-Item config/accounts.local.example.json config/accounts.local.json
 Copy-Item config/email.local.example.json config/email.local.json
 ```
+
+linux:
+```powershell
+cp config/accounts.local.example.json config/accounts.local.json
+cp config/email.local.example.json config/email.local.json
+```
+
 在accounts.local.json配置要监控的账户，将其填入`accounts`，
 其中`first_report_delay_seconds`: 60,`report_interval_seconds`: 1800   用于调整邮件发送的时间，
 first_report_delay_seconds是程序启动后第一封邮件发送时间，report_interval_seconds是下一封邮件发送间隔时间，单位为秒
@@ -154,8 +177,6 @@ first_report_delay_seconds是程序启动后第一封邮件发送时间，report
   "subject_prefix": "Binance账户监控"
 }
 ```
-
-`accounts.local.json` 只负责列出三个账户和报告周期。
 
 ## 启动
 
