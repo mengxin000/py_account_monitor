@@ -5,7 +5,9 @@ description = "Reusable Binance REST and WebSocket connection layer for account 
 requires-python = ">=3.11,<3.14"
 dependencies = [
     "aiohttp>=3.10,<4",
+    "cryptography>=50.0.1",
     "openpyxl>=3.1,<4",
+    "requests>=2.34.2",
 ]
 
 [project.scripts]

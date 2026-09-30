@@ -15,3 +15,5 @@ runtime/
 .vscode/
 *.iml
 probe_spot_key.py
+tests
+cli

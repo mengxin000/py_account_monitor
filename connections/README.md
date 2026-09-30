@@ -1,7 +1,7 @@
 # 连接层
 
 - `binance/base.py`：凭证、端点配置、公共异常和回调类型。
-- `binance/rest.py`：HMAC REST 签名、时间同步、请求重试。
+- `binance/rest.py`：HMAC/Ed25519 REST 签名、时间同步、请求重试。
 - `binance/pm_stream.py`：PM listenKey 创建、续期、失效重连与关闭。
 - `binance/spot_stream.py`：普通现货 WebSocket API 签名订阅，独立重连。
 - `binance/market_stream.py`：原有公共行情连接类。
@@ -13,19 +13,22 @@ collectors/binance/normalize.py。本阶段不拆报表调度和权益存储，�
 ## 配置和启动
 
 继续使用原来的单命令启动服务。每个账户默认启动 PM 和 Spot 两条私有流，
-复用账户顶层 api_key/secret_key（HMAC 密钥）。现有账户配置无需增加文件。
-若现货使用另一套密钥，在该账户 JSON 对象中增加：
+默认复用账户顶层 api_key/secret_key，旧 HMAC 配置保持兼容。
+若现货使用另一套凭证，可在 `spot` 中独立配置：
 
 ```json
 "spot": {
   "enabled": true,
   "api_key": "现货API Key",
-  "secret_key": "现货Secret Key"
+  "secret_key": "现货Secret Key",
+  "key_type": "auto"
 }
 ```
 
 不要把此片段作为第二个 JSON 对象追加在文件末尾。无需现货时使用
-`"spot": {"enabled": false}`。本适配器目前支持 HMAC，不支持 RSA/Ed25519。
+`"spot": {"enabled": false}`。`key_type` 可设为 `hmac` 或 `ed25519`；默认 `auto`
+会识别 PKCS#8 PEM/base64 DER Ed25519 私钥，否则按 HMAC 处理。REST 和 Spot WebSocket
+订阅使用相同签名器。RSA 暂不支持。私钥请仅保存在本地受保护的配置中，不要提交到版本库或发送到聊天中。
 
 如需指定本地 HTTP 代理，在同一账户配置增加
 `"proxy": "http://127.0.0.1:7897"`，作用于该账户 REST 和两条私有流。

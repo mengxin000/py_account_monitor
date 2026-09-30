@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import hmac
 import inspect
 import json
 import logging
@@ -70,11 +68,7 @@ class BinanceRestClient:
         values.setdefault("recvWindow", self.recv_window_ms)
         values["timestamp"] = int(time.time() * 1000) + self._time_offset_ms
         payload = self._query(values)
-        values["signature"] = hmac.new(
-            self.credentials.secret_key.encode("utf-8"),
-            payload.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+        values["signature"] = self.credentials.sign(payload)
         return values
 
     async def request(

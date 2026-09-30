@@ -1,7 +1,5 @@
 """Ordinary Spot private stream (WebSocket API signature subscription)."""
 import asyncio
-import hashlib
-import hmac
 import json
 import logging
 import time
@@ -28,7 +26,7 @@ class BinanceSpotStream:
     def subscription_request(self, timestamp):
         params = {"apiKey": self.credentials.api_key, "recvWindow": 5000, "timestamp": timestamp}
         payload = "&".join(f"{key}={params[key]}" for key in sorted(params))
-        params["signature"] = hmac.new(self.credentials.secret_key.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        params["signature"] = self.credentials.sign(payload)
         return {"id": "subscribe", "method": "userDataStream.subscribe.signature", "params": params}
 
     async def _receive(self, ws):

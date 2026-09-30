@@ -345,27 +345,28 @@ class MarketCollector:
     async def reconcile(self, monitors):
         while not self.stopping:
             for monitor in monitors:
-                for market, path in (("spot", "/papi/v1/margin/openOrders"), ("futures", "/papi/v1/um/openOrders")):
-                    account = monitor.config.account_id
+                account = monitor.config.account_id
+                sources = []
+                legacy_config = not hasattr(monitor.config, "spot_mode")
+                spot_mode = getattr(monitor.config, "spot_mode", "pm_margin")
+                futures_mode = getattr(monitor.config, "futures_mode", "pm_um")
+                spot_stream = getattr(monitor, "spot_stream", None)
+                if spot_mode == "spot" and spot_stream is not None:
+                    sources.append(("spot", spot_stream.rest, "/api/v3/openOrders", "spot"))
+                elif spot_mode == "pm_margin" and monitor.rest is not None:
+                    sources.append(("spot", monitor.rest, "/papi/v1/margin/openOrders", "pm_margin"))
+                if futures_mode == "pm_um" and monitor.rest is not None:
+                    sources.append(("futures", monitor.rest, "/papi/v1/um/openOrders", "um"))
+                elif futures_mode == "usdm" and getattr(monitor, "usdm_rest", None) is not None:
+                    sources.append(("futures", monitor.usdm_rest, "/fapi/v1/openOrders", "usdm"))
+                for market, client, path, scope in sources:
                     revision = self.revisions.get((account, market), 0)
                     try:
-                        # Portfolio-Margin openOrders supports an omitted symbol and
-                        # returns orders for all symbols. This is both more complete
-                        # and cheaper than reconstructing a symbol list from JSONL.
-                        response = await monitor.rest.get(path, params=None, signed=True)
+                        response = await client.get(path, params=None, signed=True)
                         rows = response.get("data") if isinstance(response, dict) else response
                         if not isinstance(rows, list):
                             raise ValueError("openOrders response is not a list")
-                        scoped = hasattr(monitor, "spot_stream")
-                        scope = "pm_margin" if market == "spot" else "um"
-                        orders = [{**row, "_accountScope": scope} for row in rows] if scoped else rows
-                        spot_stream = getattr(monitor, "spot_stream", None)
-                        if market == "spot" and spot_stream is not None:
-                            spot_response = await spot_stream.rest.get("/api/v3/openOrders", signed=True)
-                            spot_rows = spot_response.get("data") if isinstance(spot_response, dict) else spot_response
-                            if not isinstance(spot_rows, list):
-                                raise ValueError("Spot openOrders response is not a list")
-                            orders = [*orders, *({**row, "_accountScope": "spot"} for row in spot_rows)]
+                        orders = [{**row, "_accountScope": scope} if not legacy_config else row for row in rows]
                         # Don't overwrite a callback that arrived while REST was in flight.
                         if self.revisions.get((account, market), 0) != revision:
                             continue
@@ -379,8 +380,8 @@ class MarketCollector:
                                 continue
                             state = self.ensure((market, symbol), now)
                             order_id = str(order["orderId"])
-                            scope = order.get("_accountScope")
-                            state.orders.add((account, f"{scope}:{order_id}" if scope else order_id))
+                            order_scope = order.get("_accountScope")
+                            state.orders.add((account, f"{order_scope}:{order_id}" if order_scope else order_id))
                         for key, state in self.states.items():
                             if key[0] == market:
                                 if state.orders:

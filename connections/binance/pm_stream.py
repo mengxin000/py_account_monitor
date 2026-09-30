@@ -53,7 +53,7 @@ class BinanceUserDataStream:
                 listen_key = await self.rest.create_listen_key(self.config)
                 self.logger.info("user stream listen key created")
                 keepalive = asyncio.create_task(self._keepalive_loop(listen_key, stop_event))
-                url = f"{self.config.websocket_base_url.rstrip('/')}/ws/{listen_key}"
+                url = self.config.websocket_url(listen_key)
                 timeout = aiohttp.ClientTimeout(total=None)
                 async with aiohttp.ClientSession(timeout=timeout, trust_env=True) as session:
                     async with session.ws_connect(url, heartbeat=20, proxy=self.proxy) as ws:
@@ -86,7 +86,7 @@ class BinanceUserDataStream:
                 self.connected = False
                 reason = connection_error(exc, self.config.websocket_base_url)
                 self.logger.warning("user stream disconnected: %s", reason)
-                await _call_handler(self.on_error, {"error": reason, "source": "pm_stream"})
+                await _call_handler(self.on_error, {"error": reason, "source": self.config.source})
                 if not stop_event.is_set():
                     self.logger.info("user WebSocket reconnecting in %ss", self.reconnect_seconds)
             finally:
@@ -125,6 +125,9 @@ class BinanceUserDataStream:
                 return
             if message.type == aiohttp.WSMsgType.TEXT:
                 payload = json.loads(message.data)
+                # USDⓈ-M private combined streams can wrap events as {stream, data}.
+                if isinstance(payload, dict) and not payload.get("e") and isinstance(payload.get("data"), dict):
+                    payload = payload["data"]
                 event_type = str(payload.get("e", payload.get("eventType", ""))) if isinstance(payload, dict) else ""
                 if event_type.lower() == "listenkeyexpired":
                     raise BinanceConnectionError("listen key expired")

@@ -1,10 +1,3 @@
-"""Python translation of account_zdl/Strategy/strategy.cpp matching rules.
-
-This module intentionally keeps the old semantics: client/system-id substring
-matching, a 10-second pending timeout, BUY/SELL FIFO exposure queues, partial
-quantity consumption, proportional fees and the original abs(profit) < 2
-guard.  It is a calculation core; Excel and email output are layered on top.
-"""
 
 from __future__ import annotations
 
@@ -20,7 +13,7 @@ def is_matching_order(
     match_system_id: str,
     match_client_id: str,
 ) -> bool:
-    """Exact equivalent of C++ ``isMatchingOrder``."""
+
     if "exposure" in current_id or "exposure" in match_client_id:
         return False
     if (match_system_id and match_system_id in current_id) or (
@@ -35,7 +28,6 @@ def is_matching_order(
 
 
 def quoted_spread_from_client_id(client_id: str, market_type: str) -> float | None:
-    """Decode the value after the third ``_`` in ORDER_TRADE_UPDATE ``c``."""
     if market_type != "futures":
         return None
     parts = client_id.rsplit("_", 1)
@@ -106,7 +98,6 @@ class ExposureMatch:
 
 
 class LegacyMatcher:
-    """Stateful matcher preserving the old C++ queue and timeout behavior."""
 
     def __init__(
         self,
@@ -337,7 +328,6 @@ class LegacyMatcher:
         return moved
 
     def handle_not_match_order(self) -> list[ExposureMatch]:
-        """Exact BUY/SELL FIFO exposure reconciliation from the C++ code."""
         result: list[ExposureMatch] = []
         with self._lock:
             if not self.buy_not_match_orders or not self.sell_not_match_orders:

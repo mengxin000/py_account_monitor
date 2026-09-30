@@ -11,4 +11,6 @@ def source_metadata(event, source):
             scope = product
         elif str(event.get("e", "")).upper() in {"EXECUTIONREPORT", "EXECUTION_REPORT"}:
             scope = "pm_margin"
+    elif source == "usdm_stream":
+        scope = "usdm"
     return {"exchange": "binance", "source": source, "accountScope": scope}

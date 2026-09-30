@@ -3,7 +3,7 @@
   "user": "monitor@example.com",
   "pass": "covmvwoxfusobfig",
   "sender": "monitor@example.com",
-  "recipients": ["trader@example.com"],
+  "recipients": ["recipients@example.com"],
   "cc": [],
   "use_starttls": true,
   "subject_prefix": "Binance账户监控"
