@@ -2,6 +2,10 @@
 
 本地部署按照`启动步骤`标题下的步骤实施即可
 
+## 环境
+
+python 3.11~3.13
+
 ## 功能：公共最优报价采集
 
 在`config/accounts.local.json` 的
@@ -9,7 +13,6 @@
 每次实际成交保存此前30秒及此后10秒的报价更新。所有账户共用市场/交易对订阅，
 重叠成交窗口通过写入游标合并。
 
-账户09:30交易日目录中，
 ## 回调数据目录
 
 ```text
@@ -66,6 +69,8 @@ runtime/
 
 git clone https://github.com/mengxin000/py_account_monitor.git
 
+安装uv
+
 ## 配置
 
 每个账户一个配置文件，凭证直接放在账户文件中：
@@ -109,7 +114,6 @@ API Key 只需读取和用户数据权限。
   "key_type": "auto"
 },
 "futures": { "mode": "usdm" },
-"usdm": { "api_key": "paste-usdm-key", "secret_key": "paste-usdm-secret" }
 ```
 `key_type`支持 `auto`、`hmac`、`ed25519`。
 
@@ -120,7 +124,8 @@ API Key 只需读取和用户数据权限。
 支持的模式：`spot.mode` 为 `spot`（普通现货）、`pm_margin`（PM Margin 现货）或
 `none`；`futures.mode` 为 `pm_um`（PM U 本位期货）、`usdm`（普通 USDⓈ-M 期货）或
 `none`。
-**事实上无需修改即可，只需填入密钥和使用想要的模式，再配置邮箱发送，就可以使用uv启动**
+
+**事实上无需修改key_type，只需填入密钥和模式，再配置邮箱发送，就可以使用uv启动**
 
 ## 创建多账户总配置和邮件配置：
 
@@ -128,7 +133,7 @@ API Key 只需读取和用户数据权限。
 Copy-Item config/accounts.local.example.json config/accounts.local.json
 Copy-Item config/email.local.example.json config/email.local.json
 ```
-在accounts.local.json中配置要监控的账户填入`accounts`，
+在accounts.local.json配置要监控的账户，将其填入`accounts`，
 其中`first_report_delay_seconds`: 60,`report_interval_seconds`: 1800   用于调整邮件发送的时间，
 first_report_delay_seconds是程序启动后第一封邮件发送时间，report_interval_seconds是下一封邮件发送间隔时间，单位为秒
 
@@ -157,6 +162,7 @@ first_report_delay_seconds是程序启动后第一封邮件发送时间，report
 在项目目录执行一次即可常驻运行：
 
 ```powershell
+uv sync
 uv run binance-monitor
 ```
 
@@ -175,7 +181,7 @@ uv run binance-monitor
 连接成功、断线、自动重连、账户采集、成交写入、报告生成和邮件发送都会追加到
 `log/YYYYMMDDrun.txt`；终端只显示每秒刷新的状态面板和错误摘要。
 
-## 核心代码
+## 核心逻辑
 配对规则位于`core/legacy_matching.py`，撮合回放位于`replay/batch_replay.py`
 
 每个账户每天只有一个原始成交回调文件。报告回放时先按基础币分组；例如 `AAVEUSDT` 与 `AAVEUSDC` 都进入 AAVE 匹配器，普通配对结果写入 `matches/AAVE.jsonl`，Exposure也只在AAVE内部处理。
