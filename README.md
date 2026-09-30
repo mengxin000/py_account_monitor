@@ -174,7 +174,7 @@ first_report_delay_seconds是程序启动后第一封邮件发送时间，report
   "recipients": ["recipients@example.com"],
   "cc": [],
   "use_starttls": true,
-  "subject_prefix": "Binance账户监控"
+  "subject_prefix": "数据报表"
 }
 ```
 
