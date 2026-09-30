@@ -4,7 +4,7 @@
 
 ## 环境
 
-python 3.11~3.13
+python 3.11+
 
 ## 功能：公共最优报价采集
 
@@ -75,7 +75,7 @@ git clone https://github.com/mengxin000/py_account_monitor.git
 powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
 
-linux
+linux:
 ```powershell
 git clone https://github.com/mengxin000/py_account_monitor.git
 curl -LsSf https://astral.sh/uv/install.sh | sh
@@ -189,12 +189,12 @@ uv run binance-monitor
 
 程序启动后会同时执行：
 
-1. 每个账户每 5 秒 REST 获取账户权益和持仓，但只保留当日 09:30 基准与最新权益状态，不再逐次写 `account_info.jsonl`；
+1. 每个账户每 5 秒 REST 获取账户权益和持仓，只保留当日 09:30 基准与最新权益状态
 2. WebSocket 接收成交和订单回调，并按交易对写入 JSONL；
 3. 在 `00:05、08:05、16:05` 查询一次已结算资金费率；
 4. 每 30 分钟读取当天所有 JSONL，按照规则配对；
 5. 生成每个账户的 Excel 和 HTML；
-6. 一封邮件发送三个账户的汇总 HTML 和三个 Excel 附件；
+6. 一封邮件发送多个账户的汇总 HTML 和多个 Excel 附件；
 7. 网络断开自动重连，程序重启后仍从 JSONL 和 `equity.json` 重新计算。
 
 停止程序使用 `Ctrl+C`。不再需要单独运行采集、重放、报告或发邮件命令。
@@ -204,8 +204,6 @@ uv run binance-monitor
 
 ## 核心逻辑
 配对规则位于`core/legacy_matching.py`，撮合回放位于`replay/batch_replay.py`
-
-每个账户每天只有一个原始成交回调文件。报告回放时先按基础币分组；例如 `AAVEUSDT` 与 `AAVEUSDC` 都进入 AAVE 匹配器，普通配对结果写入 `matches/AAVE.jsonl`，Exposure也只在AAVE内部处理。
 
 报告和excel位于 `output/<account_id>/YYYYMMDD/`。
 
