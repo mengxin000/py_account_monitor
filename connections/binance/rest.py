@@ -16,6 +16,7 @@ MessageHandler = Callable[[Json], Any | Awaitable[Any]]
 
 
 from .base import BinanceCredentials, BinanceConnectionError, UserStreamConfig, _join_url
+from ..diagnostics import connection_error
 
 class BinanceRestClient:
     """Async REST client with Binance HMAC-SHA256 signed USER_DATA requests."""
@@ -139,14 +140,40 @@ class BinanceRestClient:
         async with self._time_lock:
             if self._time_synced:
                 return self._time_offset_ms
-            session = await self._get_session()
-            started = int(time.time() * 1000)
             url = _join_url(self.time_base_url, "/api/v3/time")
             try:
+                session = await self._get_session()
+                started = int(time.time() * 1000)
                 async with session.get(url, proxy=self.proxy) as response:
-                    payload = await response.json()
+                    status = response.status
+                    try:
+                        payload = await response.json()
+                    except (ValueError, aiohttp.ContentTypeError) as exc:
+                        raise BinanceConnectionError(
+                            f"time endpoint returned non-JSON http_status={status}"
+                        ) from exc
+                    # Log only numeric status/code, never the raw error body.
+                    code = payload.get("code") if isinstance(payload, dict) else None
+                    try:
+                        code = int(code) if code is not None else None
+                    except (TypeError, ValueError, OverflowError):
+                        code = None
+                    if status >= 400 or code not in (None, 0):
+                        raise BinanceConnectionError(
+                            f"time endpoint rejected request http_status={status} api_code={code}"
+                        )
                 received = int(time.time() * 1000)
-                server_time = int(payload["serverTime"])
+                if not isinstance(payload, dict) or "serverTime" not in payload:
+                    raise BinanceConnectionError("time endpoint response missing serverTime")
+                raw_time = payload["serverTime"]
+                if isinstance(raw_time, bool) or not isinstance(raw_time, (int, str)):
+                    raise BinanceConnectionError("time endpoint response has invalid serverTime")
+                try:
+                    server_time = int(raw_time)
+                except (TypeError, ValueError, OverflowError) as exc:
+                    raise BinanceConnectionError("time endpoint response has invalid serverTime") from exc
+                if server_time <= 0:
+                    raise BinanceConnectionError("time endpoint response has invalid serverTime")
                 # Estimate the midpoint of the request to reduce network-latency bias.
                 midpoint = (started + received) // 2
                 self._time_offset_ms = server_time - midpoint
@@ -154,7 +181,10 @@ class BinanceRestClient:
                 self._logger.info("Binance time offset synchronized: %d ms", self._time_offset_ms)
                 return self._time_offset_ms
             except Exception as exc:
-                self._logger.warning("Unable to synchronize Binance server time: %s", exc)
+                reason = connection_error(exc, url)
+                if isinstance(exc, BinanceConnectionError):
+                    reason += f" reason={exc}"
+                self._logger.warning("Unable to synchronize Binance server time: %s", reason)
                 # Keep running with local time; the API response will trigger
                 # one more sync attempt if it returns -1021.
                 # Do not mark the clock as synchronized on failure: transient
@@ -174,13 +204,17 @@ class BinanceRestClient:
         return listen_key
 
     async def keepalive_listen_key(self, config: UserStreamConfig, listen_key: str) -> Json:
+        # USD-M manages the account's active key through X-MBX-APIKEY; its
+        # PUT/DELETE endpoints do not take a listenKey query parameter.
+        params = None if config.listen_key_path == "/fapi/v1/listenKey" else {"listenKey": listen_key}
         return await self.request(
-            "PUT", config.listen_key_path, params={"listenKey": listen_key}, api_key=True
+            "PUT", config.listen_key_path, params=params, api_key=True
         )
 
     async def close_listen_key(self, config: UserStreamConfig, listen_key: str) -> Json:
+        params = None if config.listen_key_path == "/fapi/v1/listenKey" else {"listenKey": listen_key}
         return await self.request(
-            "DELETE", config.listen_key_path, params={"listenKey": listen_key}, api_key=True
+            "DELETE", config.listen_key_path, params=params, api_key=True
         )
 
     async def close(self) -> None:

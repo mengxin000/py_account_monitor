@@ -545,7 +545,7 @@ class BinanceAccountMonitor:
             "usdmTime": usdm_time.isoformat() if usdm_time else None,
             "spotAssets": assets, "errors": dict(self._rest_errors),
             "baselinePositions": self._baseline_positions,
-            "latestPositions": (futures_account if self.config.futures_mode == "usdm" else pm_account or {}).get("positions", []),
+            "latestPositions": ((futures_account if self.config.futures_mode == "usdm" else pm_account) or {}).get("positions", []),
         }
         self.store.write_equity_state(state, now=now)
 

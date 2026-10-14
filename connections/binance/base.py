@@ -122,7 +122,7 @@ class UserStreamConfig:
             websocket_base_url="wss://fstream.binance.com/private",
             listen_key_path="/fapi/v1/listenKey",
             source="usdm_stream",
-            private_events=("ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE"),
+            private_events=("ORDER_TRADE_UPDATE", "ACCOUNT_UPDATE", "listenKeyExpired"),
         )
 
     def websocket_url(self, listen_key: str) -> str:
