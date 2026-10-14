@@ -15,7 +15,5 @@ runtime/
 .vscode/
 *.iml
 probe_spot_key.py
-tests/*
-!tests/test_user_stream_lifecycle.py
-!tests/test_rest_equity_failures.py
+tests
 cli
