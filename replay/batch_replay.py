@@ -32,13 +32,21 @@ def _event_time(event: dict[str, Any]) -> int:
         return 0
 
 
+UNDERLYING_ALIAS = {
+    "QQQB": "QQQ",
+    "XAUT": "XAU",
+    "SNDKB": "SNDK",
+    "SPCXB": "SPCX"
+}
+
 def _exposure_key(symbol: str) -> str:
-    """Keep Exposure netting within one underlying, across USDT/USDC quotes."""
     normalized = symbol.strip().upper()
+    base = normalized
     for quote in ("USDT", "USDC"):
         if normalized.endswith(quote) and len(normalized) > len(quote):
-            return normalized[: -len(quote)]
-    return normalized or "__UNKNOWN__"
+            base = normalized[: -len(quote)]
+            break
+    return UNDERLYING_ALIAS.get(base, base) or "__UNKNOWN__"
 
 
 def replay_day(day_dir: Path) -> dict[str, Any]:
