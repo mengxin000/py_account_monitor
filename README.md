@@ -166,6 +166,15 @@ cp config/email.local.example.json config/email.local.json
 其中`first_report_delay_seconds`: 60,`report_interval_seconds`: 1800   用于调整邮件发送的时间，
 first_report_delay_seconds是程序启动后第一封邮件发送时间，report_interval_seconds是下一封邮件发送间隔时间，单位为秒
 
+`config/accounts.local.json` 可添加以下配置，将外部 JSON 附加到定时邮件和 09:30 换日邮件：
+
+```json
+"spot_futures_enable": true,
+"spot_futures_url": "D:\\binance_spot_futures\\data\\spot_futures.json"
+```
+
+开启后，每次发送前复制最新文件到 `output/spot_futures.json` 并附加发送。关闭或未配置 `spot_futures_enable` 时不复制、不附加。相对路径以项目目录为基准；配置修改后重启生效。复制失败时写入运行日志，照常发送原有报告，不附加上一次的 JSON。
+
 在email.local.json中配置邮箱发送邮件
 需要将`address`，`user`，`pass`改为你自己的，用于smtp邮件验证，
 `sender` 为邮件发送方，`recipients`为邮件接收方，`cc`为抄送

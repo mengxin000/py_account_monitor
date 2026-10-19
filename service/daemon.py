@@ -11,6 +11,8 @@ import argparse
 import asyncio
 import json
 import logging
+import shutil
+import tempfile
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -83,7 +85,38 @@ def _load_service(path: Path) -> tuple[list[Path], Path | None, float, float]:
     )
 
 
-async def _report_loop(monitors: list[BinanceAccountMonitor], email_path: Path | None, interval: float, first_delay: float, base: Path, report_state: dict[str, datetime | None]) -> None:
+def _send_reports_with_snapshot(settings, subject: str, html_body: str, attachments: list[Path],
+                                base: Path, service_config: dict[str, Any] | None = None) -> int:
+    mail_attachments = list(attachments)
+    config = service_config or {}
+    if config.get("spot_futures_enable", False) is True:
+        temporary_path = None
+        try:
+            source = _resolve(base, config["spot_futures_url"])
+            destination = base / "output" / "spot_futures.json"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            # Replace atomically so overlapping scheduled emails never read a partial copy.
+            with source.open("rb") as incoming:
+                with tempfile.NamedTemporaryFile(dir=destination.parent, prefix=".spot_futures-",
+                                                 suffix=".tmp", delete=False) as outgoing:
+                    temporary_path = Path(outgoing.name)
+                    shutil.copyfileobj(incoming, outgoing)
+            temporary_path.replace(destination)
+            mail_attachments.append(destination)
+            LOGGER.info("spot futures attachment prepared source=%s output=%s", source, destination)
+        except Exception:
+            LOGGER.exception("spot futures attachment preparation failed; sending reports without it")
+        finally:
+            if temporary_path is not None:
+                try:
+                    temporary_path.unlink(missing_ok=True)
+                except OSError:
+                    LOGGER.warning("could not remove temporary attachment path=%s", temporary_path, exc_info=True)
+    send_reports(settings, subject, html_body, mail_attachments)
+    return len(mail_attachments)
+
+
+async def _report_loop(monitors: list[BinanceAccountMonitor], email_path: Path | None, interval: float, first_delay: float, base: Path, report_state: dict[str, datetime | None], service_config: dict[str, Any] | None = None) -> None:
     report_state["next_report"] = datetime.now() + timedelta(seconds=max(0.0, first_delay))
     await asyncio.sleep(max(0.0, first_delay))
     while True:
@@ -110,14 +143,16 @@ async def _report_loop(monitors: list[BinanceAccountMonitor], email_path: Path |
                 settings = load_email_settings(email_path)
                 # SMTP is blocking; keep the 1-second dashboard responsive
                 # while the mail client performs TLS/login/retries.
-                await asyncio.to_thread(
-                    send_reports,
+                sent_count = await asyncio.to_thread(
+                    _send_reports_with_snapshot,
                     settings,
                     f"{settings.subject_prefix}_{day}",
                     "\n".join(html_parts),
                     attachments,
+                    base,
+                    service_config,
                 )
-                LOGGER.info("email sent successfully day=%s attachments=%d", day, len(attachments))
+                LOGGER.info("email sent successfully day=%s attachments=%d", day, sent_count)
             except Exception:
                 LOGGER.exception("email report failed day=%s attachments=%d", day, len(attachments))
         report_state["last_report"] = datetime.now()
@@ -125,7 +160,7 @@ async def _report_loop(monitors: list[BinanceAccountMonitor], email_path: Path |
         await asyncio.sleep(max(30.0, interval))
 
 
-async def _final_day_report_loop(monitors: list[BinanceAccountMonitor], email_path: Path | None, base: Path) -> None:
+async def _final_day_report_loop(monitors: list[BinanceAccountMonitor], email_path: Path | None, base: Path, service_config: dict[str, Any] | None = None) -> None:
     """Send the previous trading-day final report at each 09:30 boundary.
 
     This is intentionally independent from the regular half-hour loop.  A
@@ -157,8 +192,8 @@ async def _final_day_report_loop(monitors: list[BinanceAccountMonitor], email_pa
         if email_path and email_path.exists() and attachments:
             try:
                 settings = load_email_settings(email_path)
-                await asyncio.to_thread(send_reports, settings, f"{settings.subject_prefix}_{day}_final", "\n".join(html_parts), attachments)
-                LOGGER.info("final email sent successfully day=%s attachments=%d", day, len(attachments))
+                sent_count = await asyncio.to_thread(_send_reports_with_snapshot, settings, f"{settings.subject_prefix}_{day}_final", "\n".join(html_parts), attachments, base, service_config)
+                LOGGER.info("final email sent successfully day=%s attachments=%d", day, sent_count)
             except Exception:
                 LOGGER.exception("final email report failed day=%s attachments=%d", day, len(attachments))
 
@@ -186,8 +221,8 @@ async def run(service_path: Path) -> None:
     report_state: dict[str, datetime | None] = {"last_report": None, "next_report": None}
     tasks = [asyncio.create_task(monitor.run()) for monitor in monitors]
     tasks.append(asyncio.create_task(market.run(monitors)))
-    tasks.append(asyncio.create_task(_report_loop(monitors, email_path, interval, first_delay, service_path.parent.parent, report_state)))
-    tasks.append(asyncio.create_task(_final_day_report_loop(monitors, email_path, service_path.parent.parent)))
+    tasks.append(asyncio.create_task(_report_loop(monitors, email_path, interval, first_delay, service_path.parent.parent, report_state, service_config)))
+    tasks.append(asyncio.create_task(_final_day_report_loop(monitors, email_path, service_path.parent.parent, service_config)))
     tasks.append(asyncio.create_task(_dashboard(monitors, report_state)))
     from .web_service import supervise
     tasks.append(asyncio.create_task(supervise(monitors, service_path.parent.parent, service_config.get("web", {}), market_settings.get("proxy"))))

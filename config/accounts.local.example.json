@@ -1,4 +1,6 @@
 {
+  "spot_futures_enable": false,
+  "spot_futures_url": "D:\\binance_spot_futures\\data\\spot_futures.json",
   "accounts": [
     "account_zdl.local.json",
     "account_mfx.local.json",

@@ -36,7 +36,8 @@ UNDERLYING_ALIAS = {
     "QQQB": "QQQ",
     "XAUT": "XAU",
     "SNDKB": "SNDK",
-    "SPCXB": "SPCX"
+    "SPCXB": "SPCX",
+    "SOXLB": "SOXL"
 }
 
 def _exposure_key(symbol: str) -> str:
