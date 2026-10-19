@@ -7,10 +7,10 @@ from pathlib import Path
 
 try:
     from ..core.legacy_matching import LegacyMatcher
-    from ..replay.batch_replay import _event_time, _exposure_key
+    from ..replay.batch_replay import _event_time, _exposure_key, load_underlying_alias
 except ImportError:
     from core.legacy_matching import LegacyMatcher
-    from replay.batch_replay import _event_time, _exposure_key
+    from replay.batch_replay import _event_time, _exposure_key, load_underlying_alias
 
 
 class Journal:
@@ -76,21 +76,22 @@ class AccountProjection:
         self.version = 0
         self.snapshot = {}
         self.next_expiry = 0
+        self.aliases = load_underlying_alias()
 
     @staticmethod
-    def ingest(matchers, row):
+    def ingest(matchers, row, aliases=None):
         event = dict(row.get("data", row))
         for key in ("exchange", "accountId", "accountScope"):
             if key in row: event[key] = row[key]
         order = LegacyMatcher.from_order_event(event)
-        matcher = matchers.setdefault(_exposure_key(order.symbol), LegacyMatcher())
+        matcher = matchers.setdefault(_exposure_key(order.symbol, aliases), LegacyMatcher())
         matcher.ingest(order)
         matcher.find_not_match_order(now_ms=_event_time(event))
 
     def rebuild(self, records):
         matchers = {}
         for _, _, row in sorted(records, key=lambda item: (item[0], item[1])):
-            self.ingest(matchers, row)
+            self.ingest(matchers, row, self.aliases)
         return matchers
 
     @staticmethod
@@ -124,6 +125,9 @@ class AccountProjection:
 
     def _refresh(self, now=None):
         now = now or int(time.time()*1000)
+        aliases = load_underlying_alias()
+        aliases_changed = aliases != self.aliases
+        self.aliases = aliases
         rows, reset = self.journal.read()
         if reset:
             self.events, self.seen, self.matchers, self.last_event = [], set(), {}, -1
@@ -136,13 +140,13 @@ class AccountProjection:
             self.events.append(item)
             added.append(item)
         late = any(t < self.last_event for t, _, _ in added)
-        if late:
+        if late or aliases_changed:
             self.matchers = self.rebuild(self.events)
         else:
             for _, _, row in sorted(added, key=lambda item:(item[0],item[1])):
-                self.ingest(self.matchers,row)
+                self.ingest(self.matchers,row,self.aliases)
         if added: self.last_event = max(self.last_event, max(t for t,_,_ in added))
-        audit_due = time.monotonic() - self.last_check >= 3600 or reset or not self.snapshot
+        audit_due = time.monotonic() - self.last_check >= 3600 or reset or not self.snapshot or aliases_changed
         if not added and not audit_due and now < self.next_expiry:
             return self.snapshot
         result = self.view(self.matchers, max(now,self.last_event))

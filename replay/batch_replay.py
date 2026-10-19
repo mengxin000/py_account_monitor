@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import re
+from threading import Lock
 import time
 from dataclasses import asdict
 from datetime import datetime
@@ -32,25 +35,50 @@ def _event_time(event: dict[str, Any]) -> int:
         return 0
 
 
-UNDERLYING_ALIAS = {
-    "QQQB": "QQQ",
-    "XAUT": "XAU",
-    "SNDKB": "SNDK",
-    "SPCXB": "SPCX",
-    "SOXLB": "SOXL"
-}
+ALIAS_FILE = Path(__file__).resolve().parents[1] / "config" / "underlying_alias.json"
+_alias_cache: dict[str, str] | None = None
+_alias_signature = None
+_alias_lock = Lock()
 
-def _exposure_key(symbol: str) -> str:
+
+def load_underlying_alias() -> dict[str, str]:
+    """Return a validated snapshot; keep the last valid map on editing errors."""
+    global _alias_cache, _alias_signature
+    with _alias_lock:
+        try:
+            stat = ALIAS_FILE.stat()
+            signature = (stat.st_mtime_ns, stat.st_size)
+            if _alias_cache is not None and signature == _alias_signature:
+                return dict(_alias_cache)
+            data = json.loads(ALIAS_FILE.read_text(encoding="utf-8-sig"))
+            if not isinstance(data, dict) or any(
+                not isinstance(k, str) or not isinstance(v, str)
+                or not re.fullmatch(r"[A-Z0-9]+", k)
+                or not re.fullmatch(r"[A-Z0-9]+", v)
+                for k, v in data.items()
+            ):
+                raise ValueError("aliases must be an object of uppercase asset names")
+            _alias_cache, _alias_signature = data, signature
+            logging.getLogger(__name__).info("underlying aliases loaded path=%s count=%d", ALIAS_FILE, len(data))
+        except (OSError, ValueError):
+            if _alias_cache is None:
+                raise
+            logging.getLogger(__name__).warning("invalid underlying aliases; keeping last valid mapping path=%s", ALIAS_FILE, exc_info=True)
+        return dict(_alias_cache)
+
+def _exposure_key(symbol: str, aliases: dict[str, str] | None = None) -> str:
     normalized = symbol.strip().upper()
     base = normalized
     for quote in ("USDT", "USDC"):
         if normalized.endswith(quote) and len(normalized) > len(quote):
             base = normalized[: -len(quote)]
             break
-    return UNDERLYING_ALIAS.get(base, base) or "__UNKNOWN__"
+    aliases = load_underlying_alias() if aliases is None else aliases
+    return aliases.get(base, base) or "__UNKNOWN__"
 
 
 def replay_day(day_dir: Path) -> dict[str, Any]:
+    aliases = load_underlying_alias()
     events: list[tuple[int, str, int, int, dict[str, Any]]] = []
     generated_files = {
         "all_callbacks.jsonl",
@@ -89,7 +117,7 @@ def replay_day(day_dir: Path) -> dict[str, Any]:
     for event_time, _, _, _, event in events:
         probe = LegacyMatcher()
         order = probe.from_order_event(event)
-        matcher = matchers.setdefault(_exposure_key(order.symbol), LegacyMatcher())
+        matcher = matchers.setdefault(_exposure_key(order.symbol, aliases), LegacyMatcher())
         matcher.ingest(order)
         matcher.find_not_match_order(now_ms=event_time)
 
