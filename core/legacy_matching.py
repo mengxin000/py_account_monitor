@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import threading
 import time
+import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 
@@ -141,6 +142,21 @@ class LegacyMatcher:
         else:
             fee = raw_fee
 
+        quantity = float(value("z", "executedQty", "q", "quantity", default=0) or 0)
+        price = 0.0
+        # L is the LAST execution price and is normally zero on a Spot cancel.
+        # Z / z is the cumulative executed VWAP, including partial fills.
+        if event_type.lower() == "executionreport" and quantity > 0:
+            quote_amount = float(value("Z", "cummulativeQuoteQty", "cumulativeQuoteQty", default=0) or 0)
+            if quote_amount > 0:
+                price = quote_amount / quantity
+        if price <= 0:
+            for name in ("ap", "avgPrice", "L", "lastExecutedPrice"):
+                candidate = float(value(name, default=0) or 0)
+                if candidate > 0:
+                    price = candidate
+                    break
+
         return MatchOrder(
             exchange=str(event.get("exchange", "binance")),
             account_id=str(event.get("accountId", "")),
@@ -149,11 +165,9 @@ class LegacyMatcher:
             system_id=str(value("i", "orderId", default="")),
             side=str(value("S", "side", default="")),
             status=str(value("X", "x", "status", default="")),
-            # For a completed fill, prefer the accumulated average execution
-            # price; Spot executionReport commonly exposes only ``L`` (last
-            # executed price), while ``p`` is merely the submitted limit price.
-            price=float(value("ap", "avgPrice", "L", "lastExecutedPrice", "p", "price", default=0) or 0),
-            quantity=float(value("z", "executedQty", "q", "quantity", default=0) or 0),
+            # p is a limit price, never a substitute for a missing fill price.
+            price=price,
+            quantity=quantity,
             fee=fee,
             time_ms=int(value("E", "T", "time", default=int(time.time() * 1000)) or 0),
             fill_time=int(value("T", "transactTime", default=0) or 0),
@@ -177,7 +191,8 @@ class LegacyMatcher:
                     if old.identity == current.identity:
                         old.status = current.status
                         old.quantity = current.quantity
-                        old.price = current.price
+                        if current.price > 0:
+                            old.price = current.price
                         old.fee += current.fee
                         old.time_ms = current.time_ms
                         return []
@@ -190,6 +205,8 @@ class LegacyMatcher:
             accumulated = 0.0
             for index, old in enumerate(self.no_save_orders):
                 if old.identity == current.identity:
+                    if current.price <= 0 and abs(current.quantity - old.quantity) <= 1e-8:
+                        current.price = old.price
                     accumulated = old.fee
                     self.no_save_orders.pop(index)
                     break
@@ -210,6 +227,11 @@ class LegacyMatcher:
         """
         output: list[MatchRecord] = []
         with self._lock:
+            if current.quantity > 1e-8 and (not math.isfinite(current.price) or current.price <= 0):
+                raise ValueError(
+                    f"missing executed price: symbol={current.symbol} order_id={current.system_id} "
+                    f"status={current.status} quantity={current.quantity}"
+                )
             order_qty = current.quantity
             current_fee_remaining = current.fee + extra_fee
             flag = False
