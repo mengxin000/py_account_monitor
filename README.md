@@ -195,13 +195,19 @@ first_report_delay_seconds是程序启动后第一封邮件发送时间，report
 
 ## 启动
 
-在项目目录执行一次即可常驻运行：
+激活uv并将项目依赖与环境进行同步：
+
 
 ```powershell
+source ~/.bashrc
 uv sync
-uv run binance-monitor
 ```
 
+
+运行：
+```powershell
+uv run binance-monitor
+```
 程序启动后会同时执行：
 
 1. 每个账户每 5 秒 REST 获取账户权益和持仓，只保留当日 09:30 基准与最新权益状态
