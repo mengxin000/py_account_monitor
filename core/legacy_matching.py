@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 from .models import MatchOrder
-from .order_linking import is_matching_order, orders_linked, decimal_prefixes
+from .order_linking import is_matching_order, orders_linked
 
 
 def quoted_spread_from_client_id(client_id: str, market_type: str) -> float | None:
@@ -81,9 +81,6 @@ class LegacyMatcher:
         self.on_match = on_match
         self._lock = threading.RLock()
         self._execution_ids = set()
-        self._binance_ids = set()
-        self._hyperliquid_ids = set()
-        self._hyperliquid_prefixes = {}
 
     @staticmethod
     def from_order_event(event: Mapping[str, Any]) -> MatchOrder:
@@ -110,19 +107,6 @@ class LegacyMatcher:
             if current.exchange == "hyperliquid":
                 if current.identity in self._execution_ids:
                     return []
-                if current.id not in self._hyperliquid_ids:
-                    prefixes = decimal_prefixes(current.id)
-                    if len(self._binance_ids.intersection(prefixes)) > 1:
-                        raise ValueError(f"ambiguous Binance orderId prefix in Hyperliquid cloid {current.id}")
-                    for prefix in prefixes:
-                        self._hyperliquid_prefixes.setdefault(prefix, set()).add(current.id)
-                    self._hyperliquid_ids.add(current.id)
-            elif current.exchange == "binance":
-                if current.system_id not in self._binance_ids:
-                    self._binance_ids.add(current.system_id)
-                    for cloid in self._hyperliquid_prefixes.get(current.system_id, ()):
-                        if len(self._binance_ids.intersection(decimal_prefixes(cloid))) > 1:
-                            raise ValueError(f"ambiguous Binance orderId prefix in Hyperliquid cloid {cloid}")
             if current.status == "PARTIALLY_FILLED":
                 for old in self.no_save_orders:
                     if old.identity == current.identity:

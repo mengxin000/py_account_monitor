@@ -77,9 +77,9 @@ Binance永续 + Hyperliquid永续：将上例币安腿`market`改为`usdm`或`pm
 ## 订单关联、数量与收益
 
 - Binance内部配对保留原有ID包含关系。
-- 跨平台配对：动态取得币安数字orderId长度N，与Hyperliquid cloid去掉`0x`后的前N个字符比较。
-- cloid应是`0x`加32个十六进制字符，币安orderId的十进制数字原样嵌入前缀，不能将整个ID转为十六进制再比较。
-- 匹配仍按同一账户、同一标的、相反方向进行；发现多个币安ID命中同一个cloid前缀时停止本轮计算并报错。
+- 跨平台配对：Hyperliquid cloid 使用 `0xb<币安SID>b<后缀>`，提取两个 `b` 之间的十进制数字，与币安 `i`（orderId/SID，不是 `c`）完整字符串比较，不固定长度。
+- cloid仍应是`0x`加32个十六进制字符；不进行十六进制转换，后缀不参与SID比较，完整cloid仍保留用于订单识别。旧的无`b`分隔前缀格式不再用于普通配对。
+- 匹配仍按同一账户、同一标的、相反方向进行；SID只接受完整相等，不允许前缀或子串命中。
 - Hyperliquid每笔fill独立作为成交片段参与配对，按`coin+oid+time+tid`去重。一个订单的多笔fill可能生成多条配对记录，数量和手续费分别分摊。
 - cloid优先从fill/订单推送缓存取得，缺失时查询`orderStatus`；没有cloid的成交保留进入Exposure。
 - `closedPnl`不是套利收益。套利收益继续用卖出金额－买入金额－双方分摊手续费。

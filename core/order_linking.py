@@ -2,11 +2,12 @@
 import re
 
 
-def decimal_prefixes(cloid):
+def binance_sid_from_cloid(cloid):
+    """Extract the literal decimal SID from 0xb<SID>b<hex suffix>."""
     if not re.fullmatch(r"0x[0-9a-fA-F]{32}", cloid):
-        return ()
-    digits = re.match(r"[0-9]*", cloid[2:]).group()
-    return tuple(digits[:n] for n in range(1, len(digits) + 1))
+        return None
+    match = re.fullmatch(r"0xb([0-9]+)b[0-9a-fA-F]+", cloid)
+    return match.group(1) if match else None
 
 
 def is_matching_order(current_id, system_id, match_system_id, match_client_id):
@@ -29,6 +30,5 @@ def orders_linked(a, b):
         bn, hl = (a, b) if a.exchange == "binance" else (b, a)
         # Decimal digits are embedded literally; never convert cloid from hex.
         return bool(re.fullmatch(r"[0-9]+", bn.system_id)
-                    and re.fullmatch(r"0x[0-9a-fA-F]{32}", hl.id)
-                    and hl.id[2:2 + len(bn.system_id)] == bn.system_id)
+                    and binance_sid_from_cloid(hl.id) == bn.system_id)
     return False
