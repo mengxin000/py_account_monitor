@@ -29,6 +29,8 @@ def render(monitors, report_state):
     for s in statuses:
         values = [s["account_id"], number(s["pm_equity"]), number(s["usdm_equity"]), number(s["spot_equity"]), number(s["total_equity"]), number(s["actual_profit"]), number(s["unimmr"], True)]
         lines.append(" | ".join(cell(x,w) for x,w in zip(values,widths)))
+        if s.get("hyperliquid_at") or s.get("private_streams", {}).get("hyperliquid", "DISABLED") != "DISABLED":
+            lines.append(f"  Hyperliquid统一权益: {number(s.get('hyperliquid_equity'))} U | MMR: {number(s.get('hyperliquid_mmr'), True)} | 私有流: {s['private_streams']['hyperliquid']}")
 
     lines.append("连接状态———————————————————————————————————————————————————————————————————————————————————————————————————")
     conn_headers = ["账户", "PM REST", "USDⓈ-M REST", "Spot REST", "PM私有流", "USDⓈ-M私有流", "Spot私有流", "最近成交"]

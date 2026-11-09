@@ -4,6 +4,10 @@ import json
 import time
 from dataclasses import asdict
 from pathlib import Path
+try:
+    from ..core.models import callback_event
+except ImportError:
+    from core.models import callback_event
 
 try:
     from ..core.legacy_matching import LegacyMatcher
@@ -55,6 +59,9 @@ class Journal:
 
 
 def event_identity(row):
+    if row.get("normalizedOrder"):
+        n = row["normalizedOrder"]
+        return (n["exchange"], n["account_id"], n["symbol"], n["system_id"], n["execution_id"])
     event = row.get("data", row)
     order = event.get("o") if isinstance(event.get("o"), dict) else event
     scope = row.get("accountScope") or event.get("fs") or event.get("e")
@@ -80,7 +87,7 @@ class AccountProjection:
 
     @staticmethod
     def ingest(matchers, row, aliases=None):
-        event = dict(row.get("data", row))
+        event = dict(callback_event(row))
         for key in ("exchange", "accountId", "accountScope"):
             if key in row: event[key] = row[key]
         order = LegacyMatcher.from_order_event(event)
@@ -136,7 +143,7 @@ class AccountProjection:
             identity = event_identity(row)
             if identity in self.seen: continue
             self.seen.add(identity)
-            item = (_event_time(row.get("data",row)), offset, row)
+            item = (_event_time(callback_event(row)), offset, row)
             self.events.append(item)
             added.append(item)
         late = any(t < self.last_event for t, _, _ in added)
@@ -161,7 +168,7 @@ class AccountProjection:
                 identity = event_identity(row)
                 if identity in audit_seen: continue
                 audit_seen.add(identity)
-                audit_records.append((_event_time(row.get("data",row)),offset,row))
+                audit_records.append((_event_time(callback_event(row)),offset,row))
             rebuilt = self.rebuild(audit_records)
             corrected = self.view(rebuilt,max(now,self.last_event))
             self.check_status = "一致" if corrected == result else "差异已重建"

@@ -6,26 +6,8 @@ import time
 import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
-
-
-def is_matching_order(
-    current_id: str,
-    system_id: str,
-    match_system_id: str,
-    match_client_id: str,
-) -> bool:
-
-    if "exposure" in current_id or "exposure" in match_client_id:
-        return False
-    if (match_system_id and match_system_id in current_id) or (
-        system_id and system_id in match_client_id
-    ):
-        return True
-    if (match_client_id and match_client_id in current_id) or (
-        current_id and current_id in match_client_id
-    ):
-        return True
-    return False
+from .models import MatchOrder
+from .order_linking import is_matching_order, orders_linked, decimal_prefixes
 
 
 def quoted_spread_from_client_id(client_id: str, market_type: str) -> float | None:
@@ -38,29 +20,6 @@ def quoted_spread_from_client_id(client_id: str, market_type: str) -> float | No
         return int(parts[1]) / 100_000.0
     except ValueError:
         return None
-
-
-@dataclass
-class MatchOrder:
-    id: str
-    system_id: str
-    side: str
-    status: str
-    price: float
-    quantity: float
-    fee: float = 0.0
-    flage: int = 0  # spelling retained for showData compatibility
-    time_ms: int = field(default_factory=lambda: int(time.time() * 1000))
-    fill_time: int = 0
-    symbol: str = ""
-    market_type: str = ""  # spot (executionReport) or futures (ORDER_TRADE_UPDATE)
-    exchange: str = "binance"
-    account_id: str = ""
-    account_scope: str = "unknown"
-
-    @property
-    def identity(self):
-        return (self.exchange, self.account_id, self.account_scope, self.market_type, self.symbol, self.system_id)
 
 
 @dataclass(frozen=True)
@@ -83,6 +42,8 @@ class MatchRecord:
     match_symbol: str = ""
     quoted_spread: float | None = None
     quoted_spread_side: str = ""
+    current_exchange: str = "binance"
+    match_exchange: str = "binance"
 
 
 @dataclass(frozen=True)
@@ -119,61 +80,21 @@ class LegacyMatcher:
         self.exposure_records: list[ExposureMatch] = []
         self.on_match = on_match
         self._lock = threading.RLock()
+        self._execution_ids = set()
+        self._binance_ids = set()
+        self._hyperliquid_ids = set()
+        self._hyperliquid_prefixes = {}
 
     @staticmethod
     def from_order_event(event: Mapping[str, Any]) -> MatchOrder:
-        """Build a MatchOrder from Binance PM/Futures or Spot order payload."""
-        order = event.get("o") if isinstance(event.get("o"), Mapping) else event
-        event_type = str(event.get("e", event.get("eventType", "")))
-        def value(*names: str, default: Any = "") -> Any:
-            for name in names:
-                if name in order and order[name] is not None:
-                    return order[name]
-            return default
-
-        raw_fee = float(value("n", "commission", default=0) or 0)
-        spot_N = str(value("N", default=""))
-        # Spot executionReport commissions are reported in the traded asset;
-        # convert them to quote currency with the actual fill price. Futures
-        # ORDER_TRADE_UPDATE commissions are already quoted in USDT/USDC.
-        if event_type == "executionReport" and spot_N not in ("USDT", "USDC", ""):
-            fill_price = float(value("L", "lastExecutedPrice", "ap", "avgPrice", "p", "price", default=0) or 0)
-            fee = raw_fee * fill_price
-        else:
-            fee = raw_fee
-
-        quantity = float(value("z", "executedQty", "q", "quantity", default=0) or 0)
-        price = 0.0
-        # L is the LAST execution price and is normally zero on a Spot cancel.
-        # Z / z is the cumulative executed VWAP, including partial fills.
-        if event_type.lower() == "executionreport" and quantity > 0:
-            quote_amount = float(value("Z", "cummulativeQuoteQty", "cumulativeQuoteQty", default=0) or 0)
-            if quote_amount > 0:
-                price = quote_amount / quantity
-        if price <= 0:
-            for name in ("ap", "avgPrice", "L", "lastExecutedPrice"):
-                candidate = float(value(name, default=0) or 0)
-                if candidate > 0:
-                    price = candidate
-                    break
-
-        return MatchOrder(
-            exchange=str(event.get("exchange", "binance")),
-            account_id=str(event.get("accountId", "")),
-            account_scope=str(event.get("accountScope", "unknown")),
-            id=str(value("c", "clientOrderId", default="")),
-            system_id=str(value("i", "orderId", default="")),
-            side=str(value("S", "side", default="")),
-            status=str(value("X", "x", "status", default="")),
-            # p is a limit price, never a substitute for a missing fill price.
-            price=price,
-            quantity=quantity,
-            fee=fee,
-            time_ms=int(value("E", "T", "time", default=int(time.time() * 1000)) or 0),
-            fill_time=int(value("T", "transactTime", default=0) or 0),
-            symbol=str(value("s", "symbol", default="") or "").upper(),
-            market_type="spot" if event_type.lower() == "executionreport" else ("futures" if event_type.upper() == "ORDER_TRADE_UPDATE" else ""),
-        )
+        """Backward-compatible entry point for a normalized or Binance order."""
+        if isinstance(event.get("_normalizedOrder"), Mapping):
+            return MatchOrder(**event["_normalizedOrder"])
+        try:
+            from ..collectors.binance.orders import normalize_order
+        except ImportError:
+            from collectors.binance.orders import normalize_order
+        return normalize_order(event)
 
     def enqueue(self, order: MatchOrder) -> None:
         with self._lock:
@@ -186,6 +107,22 @@ class LegacyMatcher:
         on the terminal callback their accumulated fees are added exactly once.
         """
         with self._lock:
+            if current.exchange == "hyperliquid":
+                if current.identity in self._execution_ids:
+                    return []
+                if current.id not in self._hyperliquid_ids:
+                    prefixes = decimal_prefixes(current.id)
+                    if len(self._binance_ids.intersection(prefixes)) > 1:
+                        raise ValueError(f"ambiguous Binance orderId prefix in Hyperliquid cloid {current.id}")
+                    for prefix in prefixes:
+                        self._hyperliquid_prefixes.setdefault(prefix, set()).add(current.id)
+                    self._hyperliquid_ids.add(current.id)
+            elif current.exchange == "binance":
+                if current.system_id not in self._binance_ids:
+                    self._binance_ids.add(current.system_id)
+                    for cloid in self._hyperliquid_prefixes.get(current.system_id, ()):
+                        if len(self._binance_ids.intersection(decimal_prefixes(cloid))) > 1:
+                            raise ValueError(f"ambiguous Binance orderId prefix in Hyperliquid cloid {cloid}")
             if current.status == "PARTIALLY_FILLED":
                 for old in self.no_save_orders:
                     if old.identity == current.identity:
@@ -215,7 +152,10 @@ class LegacyMatcher:
             # partial-fill commission into the terminal order instead of
             # leaving only the last callback's commission on a residual.
             current.fee += accumulated
-            return self.process_completed(current, extra_fee=extra_fee)
+            result = self.process_completed(current, extra_fee=extra_fee)
+            if current.exchange == "hyperliquid":
+                self._execution_ids.add(current.identity)
+            return result
 
     def process_completed(self, current: MatchOrder, *, extra_fee: float = 0.0) -> list[MatchRecord]:
         """Match an incoming (later) order against queued (earlier) match orders.
@@ -239,7 +179,7 @@ class LegacyMatcher:
             index = 0
             while index < len(self.match_orders):
                 queued_order = self.match_orders[index]
-                if not is_matching_order(current.id, current.system_id, queued_order.system_id, queued_order.id):
+                if not orders_linked(current, queued_order):
                     index += 1
                     continue
                 min_qty = min(order_qty, queued_order.quantity)
@@ -260,6 +200,10 @@ class LegacyMatcher:
                     futures_price, spot_price = current.price, queued_order.price
                 else:
                     futures_price, spot_price = sell_price, buy_price
+                    # For perp/perp across venues use Binance minus Hyperliquid.
+                    if {current.exchange, queued_order.exchange} == {"binance", "hyperliquid"}:
+                        futures_price = current.price if current.exchange == "binance" else queued_order.price
+                        spot_price = current.price if current.exchange == "hyperliquid" else queued_order.price
                 offset = (futures_price - spot_price) / futures_price if futures_price else 0.0
                 quoted_spread = quoted_spread_from_client_id(
                     queued_order.id, queued_order.market_type
@@ -287,6 +231,8 @@ class LegacyMatcher:
                     match_symbol=current.symbol,
                     quoted_spread=quoted_spread,
                     quoted_spread_side=quoted_spread_side,
+                    current_exchange=queued_order.exchange,
+                    match_exchange=current.exchange,
                 )
                 output.append(record)
                 self.records.append(record)

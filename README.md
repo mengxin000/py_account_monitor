@@ -1,5 +1,34 @@
 # 监控程序
 
+Hyperliquid统一账户永续与Binance现货/永续的组合配置、订单关联及切换方式见 [Hyperliquid适配说明](docs/HYPERLIQUID.md)。现有Binance配置和启动命令保持兼容。
+
+## 多账户独立组合
+
+邮件“收益与成交量”表下显示各配置市场的当日资费明细：不同交易所显示如“Binance资费 / Hyperliquid资费”，同一交易所按市场区分如“Binance现货资费 / Binance USDM资费”。原表的“费率损益”仍为合计，收益公式及 Excel 不变。明细是当前交易日已写入 `funding.jsonl` 的金额，零不代表接口健康；历史记录来源不明确时单列“未归属资费”，不强行归到某一条腿。
+
+`config/accounts.local.json` 的 `accounts` 列表继续引用各单账户配置；每份配置独立选择 Binance / Hyperliquid 组合，不要求所有账户使用同一方案。启动命令不变：`uv run binance-monitor`。
+
+- 每个 `account_id` 必须唯一，仅使用字母、数字、下划线或连字符。
+- 未指定 `output_dir` 时，原始数据默认写入 `runtime/<account_id>`；已显式设置的路径保留。不同账户的运行目录不得相同或相互嵌套，启动时会检查。
+- 同一监控账户内的 `pm_margin` 与 `pm_um` 共用一个 PM 连接，显式填写的凭证必须一致；不同监控账户可以使用不同凭证。
+- **凭证变更说明：不再自动读取公共 `BINANCE_*` 环境变量覆盖账户配置。** 使用配置文件中的 `api_key` / `secret_key` 不受影响；若通过环境变量管理凭证，必须在相应账户/腿中明确指定名称，且不能同时填写明文凭证。例如：
+
+```json
+{
+  "exchange": "binance",
+  "market": "usdm",
+  "credentials": {
+    "api_key_env": "ZDL_USDM_API_KEY",
+    "secret_key_env": "ZDL_USDM_SECRET_KEY",
+    "key_type": "auto"
+  }
+}
+```
+
+旧式配置也支持在顶层、`spot` 或 `usdm` 中直接填写这两个 `*_env` 字段。可选 `key_type_env` 同样需显式指定。环境变量缺失时拒绝启动，不回退到其他账户的凭证。
+
+报告仍按各账户生成 Excel 并统一发邮件，普通配对、Exposure 计算和邮件格式不变。定时报表生成及发送在后台线程串行执行，普通邮件与 09:30 最终邮件不会相互改写附件；这不是跨进程锁，不要同时另起 CLI 报告进程操作相同输出。每次报告的配对和成交统计使用同一份成交记录及标的别名快照，生成期间的新成交在下一次报告纳入。交易对汇总应用 `config/underlying_alias.json` 的映射，但成交明细保留原始交易对。
+
 本地部署按照`启动步骤`标题下的步骤实施
 
 ## 环境

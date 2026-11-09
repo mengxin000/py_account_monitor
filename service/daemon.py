@@ -13,6 +13,7 @@ import json
 import logging
 import shutil
 import tempfile
+import threading
 from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -25,7 +26,8 @@ try:
     from ..reports.excel_report import build_workbook
     from ..reports.html_report import build_html
     from ..reports.report_data import load_report_data
-    from ..replay.batch_replay import replay_day
+    from ..reports.funding import configured_markets
+    from ..replay.batch_replay import replay_day, load_underlying_alias, read_trade_sources
     from ..collectors.market_collector import MarketCollector
 except ImportError:  # running from the project directory
     from collectors.account_monitor import BinanceAccountMonitor, load_config, trading_day
@@ -34,10 +36,75 @@ except ImportError:  # running from the project directory
     from reports.excel_report import build_workbook
     from reports.html_report import build_html
     from reports.report_data import load_report_data
-    from replay.batch_replay import replay_day
+    from reports.funding import configured_markets
+    from replay.batch_replay import replay_day, load_underlying_alias, read_trade_sources
     from collectors.market_collector import MarketCollector
 
 LOGGER = logging.getLogger("binance_monitor_service")
+# Both schedules run in worker threads. Hold through SMTP reading attachments,
+# so another report cannot rewrite a workbook while it is being sent.
+_REPORT_LOCK = threading.Lock()
+
+
+def _validate_accounts(configs) -> None:
+    ids, roots = set(), []
+    for config in configs:
+        account_id = config.account_id.casefold()
+        if account_id in ids:
+            raise ValueError(f"duplicate account_id: {config.account_id}")
+        ids.add(account_id)
+        root = config.output_dir.resolve()
+        for previous in roots:
+            if root == previous or root in previous.parents or previous in root.parents:
+                raise ValueError(f"overlapping account runtime directories: {root} and {previous}")
+        roots.append(root)
+
+
+def _generate_and_send_reports(monitors, email_path, base, day, service_config=None, *, final=False):
+    """Blocking report transaction; callers must run this outside the event loop."""
+    with _REPORT_LOCK:
+        attachments = []
+        html_parts = [f"<h2>Binance账户监控报告 {day}</h2>"]
+        aliases = load_underlying_alias()
+        for monitor in monitors:
+            try:
+                day_dir = monitor.store.root / day
+                if not day_dir.exists():
+                    continue
+                sources = read_trade_sources(day_dir)
+                replay_day(day_dir, aliases=aliases, trade_sources=sources)
+                data = load_report_data(day_dir, monitor.config.account_id,
+                                        aliases=aliases, trade_sources=sources)
+                data.funding_markets = configured_markets(monitor.config)
+                output_dir = base / "output" / monitor.config.account_id / day
+                xlsx = build_workbook(data, output_dir / f"{monitor.config.account_id}_{day}.xlsx")
+                html_path = build_html(data, output_dir / f"{monitor.config.account_id}_{day}.html")
+                attachments.append(xlsx)
+                html_parts.append(html_path.read_text(encoding="utf-8"))
+                LOGGER.info("report generated account=%s final=%s xlsx=%s", monitor.config.account_id, final, xlsx)
+            except Exception:
+                LOGGER.exception("report failed for account %s final=%s", monitor.config.account_id, final)
+        if email_path and email_path.exists() and attachments:
+            try:
+                settings = load_email_settings(email_path)
+                subject = f"{settings.subject_prefix}_{day}" + ("_final" if final else "")
+                count = _send_reports_with_snapshot(settings, subject, "\n".join(html_parts),
+                                                    attachments, base, service_config)
+                LOGGER.info("email sent successfully day=%s final=%s attachments=%d", day, final, count)
+            except Exception:
+                LOGGER.exception("email report failed day=%s final=%s attachments=%d", day, final, len(attachments))
+
+
+async def _run_report_job(*args, **kwargs):
+    # Cancellation must not release ownership while a worker still writes files.
+    worker = asyncio.create_task(asyncio.to_thread(_generate_and_send_reports, *args, **kwargs))
+    try:
+        await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        await worker
+        raise
+    except Exception:
+        LOGGER.exception("report job failed")
 
 
 def _fmt(value: Any) -> str:
@@ -121,40 +188,7 @@ async def _report_loop(monitors: list[BinanceAccountMonitor], email_path: Path |
     await asyncio.sleep(max(0.0, first_delay))
     while True:
         day = trading_day()
-        attachments: list[Path] = []
-        html_parts: list[str] = [f"<h2>Binance账户监控报告 {day}</h2>"]
-        for monitor in monitors:
-            try:
-                day_dir = monitor.store.root / day
-                if not day_dir.exists():
-                    continue
-                replay_day(day_dir)
-                data = load_report_data(day_dir, monitor.config.account_id)
-                output_dir = base / "output" / monitor.config.account_id / day
-                xlsx = build_workbook(data, output_dir / f"{monitor.config.account_id}_{day}.xlsx")
-                html_path = build_html(data, output_dir / f"{monitor.config.account_id}_{day}.html")
-                LOGGER.info("report generated account=%s xlsx=%s html=%s", monitor.config.account_id, xlsx, html_path)
-                attachments.append(xlsx)
-                html_parts.append(html_path.read_text(encoding="utf-8"))
-            except Exception:
-                LOGGER.exception("report failed for account %s", monitor.config.account_id)
-        if email_path and email_path.exists() and attachments:
-            try:
-                settings = load_email_settings(email_path)
-                # SMTP is blocking; keep the 1-second dashboard responsive
-                # while the mail client performs TLS/login/retries.
-                sent_count = await asyncio.to_thread(
-                    _send_reports_with_snapshot,
-                    settings,
-                    f"{settings.subject_prefix}_{day}",
-                    "\n".join(html_parts),
-                    attachments,
-                    base,
-                    service_config,
-                )
-                LOGGER.info("email sent successfully day=%s attachments=%d", day, sent_count)
-            except Exception:
-                LOGGER.exception("email report failed day=%s attachments=%d", day, len(attachments))
+        await _run_report_job(monitors, email_path, base, day, service_config)
         report_state["last_report"] = datetime.now()
         report_state["next_report"] = datetime.now() + timedelta(seconds=max(30.0, interval))
         await asyncio.sleep(max(30.0, interval))
@@ -173,35 +207,14 @@ async def _final_day_report_loop(monitors: list[BinanceAccountMonitor], email_pa
             target += timedelta(days=1)
         await asyncio.sleep(max(0.0, (target - now).total_seconds()))
         day = (target - timedelta(days=1)).strftime("%Y%m%d")
-        attachments: list[Path] = []
-        html_parts: list[str] = [f"<h2>Binance账户监控报告 {day}</h2>"]
-        for monitor in monitors:
-            try:
-                day_dir = monitor.store.root / day
-                if not day_dir.exists():
-                    continue
-                replay_day(day_dir)
-                data = load_report_data(day_dir, monitor.config.account_id)
-                output_dir = base / "output" / monitor.config.account_id / day
-                xlsx = build_workbook(data, output_dir / f"{monitor.config.account_id}_{day}.xlsx")
-                html_path = build_html(data, output_dir / f"{monitor.config.account_id}_{day}.html")
-                attachments.append(xlsx)
-                html_parts.append(html_path.read_text(encoding="utf-8"))
-            except Exception:
-                LOGGER.exception("final report failed for account %s", monitor.config.account_id)
-        if email_path and email_path.exists() and attachments:
-            try:
-                settings = load_email_settings(email_path)
-                sent_count = await asyncio.to_thread(_send_reports_with_snapshot, settings, f"{settings.subject_prefix}_{day}_final", "\n".join(html_parts), attachments, base, service_config)
-                LOGGER.info("final email sent successfully day=%s attachments=%d", day, sent_count)
-            except Exception:
-                LOGGER.exception("final email report failed day=%s attachments=%d", day, len(attachments))
+        await _run_report_job(monitors, email_path, base, day, service_config, final=True)
 
 
 async def run(service_path: Path) -> None:
     account_files, email_path, interval, first_delay = _load_service(service_path)
     service_config = json.loads(service_path.read_text(encoding="utf-8"))
     configs = [load_config(path) for path in account_files]
+    _validate_accounts(configs)
     shared_proxy = service_config.get("proxy")
     if shared_proxy:
         configs = [replace(c, proxy=c.proxy or shared_proxy) for c in configs]
@@ -218,6 +231,9 @@ async def run(service_path: Path) -> None:
     market = MarketCollector(service_path.parent.parent / "runtime" / "raw", market_settings)
     for monitor in monitors:
         monitor.market_collector = market
+        if monitor.hyperliquid:
+            account_id = monitor.config.account_id
+            monitor.hyperliquid.on_market = lambda event, account_id=account_id: market.order_event(account_id, event)
     report_state: dict[str, datetime | None] = {"last_report": None, "next_report": None}
     tasks = [asyncio.create_task(monitor.run()) for monitor in monitors]
     tasks.append(asyncio.create_task(market.run(monitors)))

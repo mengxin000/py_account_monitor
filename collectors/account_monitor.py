@@ -24,7 +24,7 @@ import stat
 import threading
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Mapping
@@ -51,6 +51,11 @@ except ImportError:
     from connections.binance.spot_stream import BinanceSpotStream
 from .binance.normalize import source_metadata
 from .binance.equity import spot_equity
+from .hyperliquid.account import HyperliquidCollector
+try:
+    from ..config.legs import resolve_legs, validate_hyperliquid
+except ImportError:
+    from config.legs import resolve_legs, validate_hyperliquid
 try:
     from ..connections.diagnostics import connection_error
 except ImportError:
@@ -77,6 +82,9 @@ class AccountMonitorConfig:
     spot_credentials: BinanceCredentials | None = None
     proxy: str | None = None
     pm_usd_to_usdt: float = 1.0
+    hyperliquid: dict[str, Any] = field(default_factory=dict)
+    # Public identities only, in configured order; never pass credentials to reports.
+    report_markets: tuple[tuple[str, str], ...] = ()
 
 
 def trading_day(now: datetime | None = None) -> str:
@@ -201,7 +209,7 @@ class JsonlEventStore:
                     pass
         return path
 
-    def append_trade_event(self, event: Mapping[str, Any], *, source: str = "unknown") -> Path | None:
+    def append_trade_event(self, event: Mapping[str, Any], *, source: str = "unknown", valuation_rates=None) -> Path | None:
         symbol = _event_symbol(event)
         if not symbol:
             return None
@@ -218,6 +226,8 @@ class JsonlEventStore:
         }
         # One chronological source of truth per account/day. Pairing and
         # Exposure grouping are derived later by underlying asset.
+        if valuation_rates:
+            record["valuationRates"] = valuation_rates
         return self.append("trade_callbacks.jsonl", record)
 
 
@@ -233,7 +243,9 @@ class BinanceAccountMonitor:
             raise ValueError(f"unsupported spot.mode: {config.spot_mode}")
         if config.futures_mode not in {"pm_um", "usdm", "none"}:
             raise ValueError(f"unsupported futures.mode: {config.futures_mode}")
-        if config.spot_mode == "none" and config.futures_mode == "none":
+        validate_hyperliquid(config.hyperliquid)
+        self.uses_hyperliquid = bool(config.hyperliquid.get("enabled", False))
+        if config.spot_mode == "none" and config.futures_mode == "none" and not self.uses_hyperliquid:
             raise ValueError("at least one of spot.mode or futures.mode must be enabled")
         if config.futures_mode == "usdm" and config.usdm_credentials is None:
             raise ValueError("futures.mode=usdm requires usdm api_key and secret_key")
@@ -276,9 +288,17 @@ class BinanceAccountMonitor:
         self._pm_equity = None
         self._usdm_equity = None
         self._total_equity = None
+        self.hyperliquid = HyperliquidCollector(
+            config.account_id, self.store, config.hyperliquid,
+            on_trade=self._hyperliquid_trade, on_error=self._on_stream_error, proxy=config.proxy,
+        ) if self.uses_hyperliquid else None
+        self._hyperliquid_equity = None
+        self._hyperliquid_mmr = None
         self._baseline_components = None
         self._legacy_baseline = None
         self._equity_scope = f"spot={config.spot_mode};futures={config.futures_mode}:USDT:{config.pm_usd_to_usdt}"
+        if self.hyperliquid:
+            self._equity_scope += f";hyperliquid={config.hyperliquid['address'].lower()}:unified:{config.hyperliquid.get('usdc_to_usdt', 1.0)}:{json.dumps(config.hyperliquid.get('token_rates', {}), sort_keys=True)}"
         self._baseline_equity: float | None = None
         self._baseline_at: datetime | None = None
         self._baseline_day: str | None = None
@@ -301,6 +321,9 @@ class BinanceAccountMonitor:
             except (TypeError, ValueError):
                 pass
         return None
+
+    def _hyperliquid_trade(self):
+        self._last_trade_at = datetime.now()
 
     def _load_baseline(self) -> None:
         path = self.store._path("equity.json")
@@ -377,7 +400,10 @@ class BinanceAccountMonitor:
                 LOGGER.info("funding callback received account=%s", self.config.account_id)
         if _is_fill_callback(event):
             self._last_trade_at = datetime.now()
-            path = self.store.append_trade_event(event, source=source)
+            valuation_rates = None
+            if getattr(self, "hyperliquid", None):
+                valuation_rates = {"USDT": 1.0, "USDC": float(self.config.hyperliquid.get("usdc_to_usdt", 1.0))}
+            path = self.store.append_trade_event(event, source=source, valuation_rates=valuation_rates)
             if path:
                 LOGGER.debug("trade callback %s -> %s", _event_symbol(event), path)
 
@@ -416,6 +442,19 @@ class BinanceAccountMonitor:
         spot_value = 0.0 if self.config.spot_mode == "none" else None
         usdm_value = 0.0 if self.config.futures_mode != "usdm" else None
         assets = []
+        hl_snapshot = None
+        hl_value = 0.0 if not self.hyperliquid else None
+        hl_time = None
+        if self.hyperliquid:
+            try:
+                hl_snapshot = await self.hyperliquid.equity_snapshot()
+                hl_value = hl_snapshot["equity"]
+                hl_time = self.hyperliquid.last_at
+                self._hyperliquid_mmr = hl_snapshot["mmr"]
+                self._rest_errors.pop("hyperliquid", None)
+            except Exception as exc:
+                self._rest_errors["hyperliquid"] = f"{type(exc).__name__}: {exc}"
+            self._hyperliquid_equity = hl_value
         pm_time = futures_time = spot_time = usdm_time = None
         if self.uses_pm:
             try:
@@ -493,6 +532,8 @@ class BinanceAccountMonitor:
         self._spot_equity = spot_value if self.config.spot_mode == "spot" else None
         self._total_equity = None
         component_times = [at for at, value in ((pm_time, float(pm_account["actualEquity"]) * self.config.pm_usd_to_usdt if pm_account else None), (spot_time, spot_value), (usdm_time, usdm_value)) if at and value is not None]
+        if hl_time:
+            component_times.append(hl_time)
         if component_times and (max(component_times) - min(component_times)).total_seconds() > max(30, self.config.rest_interval_seconds * 3):
             if spot_time:
                 self._rest_errors["spot"] = "equity sample time skew too large"
@@ -500,6 +541,9 @@ class BinanceAccountMonitor:
             if usdm_time:
                 self._rest_errors["usdm"] = "equity sample time skew too large"
                 usdm_value = None
+            if hl_time:
+                self._rest_errors["hyperliquid"] = "equity sample time skew too large"
+                hl_value = None
         if trading_day() != day:
             return  # Never mix samples spanning the 09:30 boundary.
         if self._baseline_day != day:
@@ -509,10 +553,11 @@ class BinanceAccountMonitor:
             self._baseline_components = None
             self._legacy_baseline = None
         pm = float(pm_account["actualEquity"]) * self.config.pm_usd_to_usdt if pm_account else (0.0 if not self.uses_pm else None)
-        components = [value for value in (pm, spot_value, usdm_value) if value is not None]
+        components = [value for value in (pm, spot_value, usdm_value, hl_value) if value is not None]
         required_ready = ((not self.uses_pm or pm is not None)
                           and (self.config.spot_mode != "spot" or spot_value is not None)
-                          and (self.config.futures_mode != "usdm" or usdm_value is not None))
+                          and (self.config.futures_mode != "usdm" or usdm_value is not None)
+                          and (not self.hyperliquid or hl_value is not None))
         if required_ready and components:
             self._total_equity = sum(components)
             if self._baseline_equity is None:
@@ -522,9 +567,13 @@ class BinanceAccountMonitor:
                                             "pmTime": pm_time.isoformat() if pm_time else None,
                                             "spotTime": spot_time.isoformat() if spot_time else None,
                                             "usdmTime": usdm_time.isoformat() if usdm_time else None}
+                if self.hyperliquid:
+                    self._baseline_components["hyperliquid"] = hl_value
                 baseline_account = futures_account if self.config.futures_mode == "usdm" else pm_account
                 self._baseline_positions = baseline_account.get("positions", []) if baseline_account else []
                 LOGGER.info("combined equity baseline initialized account=%s day=%s time=%s", self.config.account_id, day, self._baseline_at)
+            if self.hyperliquid and hl_time:
+                self._last_account_at = max(component_times)
         state = {
             "schemaVersion": 2, "equityScope": self._equity_scope,
             "valuationCurrency": "USDT", "pmUsdToUsdt": self.config.pm_usd_to_usdt,
@@ -543,6 +592,9 @@ class BinanceAccountMonitor:
             "spotTime": spot_time.isoformat() if spot_time else None,
             "usdmEquity": usdm_value,
             "usdmTime": usdm_time.isoformat() if usdm_time else None,
+            "hyperliquidEquity": hl_value if self.hyperliquid else None,
+            "hyperliquidTime": hl_time.isoformat() if hl_time else None,
+            "hyperliquidState": hl_snapshot,
             "spotAssets": assets, "errors": dict(self._rest_errors),
             "baselinePositions": self._baseline_positions,
             "latestPositions": ((futures_account if self.config.futures_mode == "usdm" else pm_account) or {}).get("positions", []),
@@ -631,6 +683,9 @@ class BinanceAccountMonitor:
         rest_task = asyncio.create_task(self._rest_loop())
         funding_task = asyncio.create_task(self._funding_loop())
         tasks = [rest_task, funding_task]
+        if self.hyperliquid:
+            tasks.append(asyncio.create_task(self.hyperliquid.stream.run(self.stop_event)))
+            tasks.append(asyncio.create_task(self.hyperliquid.funding_loop(self.stop_event)))
         if self.user_stream is not None:
             tasks.append(asyncio.create_task(self.user_stream.run(self.stop_event)))
         if self.usdm_stream is not None:
@@ -649,6 +704,8 @@ class BinanceAccountMonitor:
                 await self.rest.close()
             if self.usdm_rest is not None:
                 await self.usdm_rest.close()
+            if self.hyperliquid:
+                await self.hyperliquid.rest.close()
 
     async def stop(self) -> None:
         self.stop_event.set()
@@ -671,11 +728,15 @@ class BinanceAccountMonitor:
                 "pm": ("CONNECTED" if self.user_stream.connected else "CONNECTING") if self.user_stream else "DISABLED",
                 "usdm": ("CONNECTED" if self.usdm_stream.connected else "CONNECTING") if self.usdm_stream else "DISABLED",
                 "spot": ("CONNECTED" if self.spot_stream.connected else "CONNECTING") if self.spot_stream else "DISABLED",
+                "hyperliquid": ("CONNECTED" if self.hyperliquid.stream.connected else "CONNECTING") if self.hyperliquid else "DISABLED",
             },
             "account_id": self.config.account_id,
             "pm_equity": self._pm_equity,
             "usdm_equity": self._usdm_equity,
             "spot_equity": self._spot_equity,
+            "hyperliquid_equity": self._hyperliquid_equity,
+            "hyperliquid_at": self.hyperliquid.last_at if self.hyperliquid else None,
+            "hyperliquid_mmr": self._hyperliquid_mmr,
             "total_equity": self._total_equity if fresh else None,
             "actual_profit": self._total_equity - self._baseline_equity if fresh and self._total_equity is not None and self._baseline_equity is not None else None,
             "spot_at": self._spot_at,
@@ -683,7 +744,8 @@ class BinanceAccountMonitor:
             "stream_errors": {k:v for k,v in self._stream_errors.items()
                               if not ((k == "pm_stream" and self.user_stream and self.user_stream.connected)
                                       or (k == "usdm_stream" and self.usdm_stream and self.usdm_stream.connected)
-                                      or (k == "spot_stream" and self.spot_stream and self.spot_stream.connected))},
+                                      or (k == "spot_stream" and self.spot_stream and self.spot_stream.connected)
+                                      or (k == "hyperliquid_stream" and self.hyperliquid and self.hyperliquid.stream.connected))},
             "account_equity": value("accountEquity"),
             "actual_equity": (float(account["actualEquity"]) * self.config.pm_usd_to_usdt
                               if account.get("actualEquity") is not None else
@@ -701,35 +763,23 @@ class BinanceAccountMonitor:
 
 def _credential_pair(
     *,
-    api_key_env: str,
-    secret_key_env: str,
-    key_type_env: str,
     sources: list[Mapping[str, Any]],
     fallback: tuple[str | None, str | None, str] | None = None,
 ) -> tuple[str | None, str | None, str]:
-    """Resolve a complete API-key/secret pair without mixing sources."""
-    env_api = os.getenv(api_key_env)
-    env_secret = os.getenv(secret_key_env)
-    if env_api or env_secret:
-        if not env_api or not env_secret:
-            raise SystemExit(f"{api_key_env} and {secret_key_env} must be set together")
-        return env_api, env_secret, os.getenv(key_type_env, "auto")
-
-    for source in sources:
-        api_key = source.get("api_key") or source.get("apiKey")
-        secret_key = source.get("secret_key") or source.get("secKey")
-        if api_key or secret_key:
-            if not api_key or not secret_key:
-                raise SystemExit(f"{api_key_env} and {secret_key_env} credentials must be configured as a pair")
-            return str(api_key), str(secret_key), os.getenv(key_type_env) or str(source.get("key_type", "auto"))
-
-    if fallback:
-        return fallback[0], fallback[1], os.getenv(key_type_env) or fallback[2]
-    return None, None, os.getenv(key_type_env, "auto")
+    """Resolve only this account's explicitly configured credential sources."""
+    try:
+        from ..config.credentials import credential_pair
+    except ImportError:
+        from config.credentials import credential_pair
+    try:
+        return credential_pair(sources, fallback)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
 
 
 def load_config(path: Path) -> AccountMonitorConfig:
-    values = json.loads(path.read_text(encoding="utf-8"))
+    raw_values = json.loads(path.read_text(encoding="utf-8"))
+    values = resolve_legs(raw_values)
     credentials_file = values.get("credentials_file")
     credential_values: dict[str, Any] = {}
     if credentials_file:
@@ -740,18 +790,17 @@ def load_config(path: Path) -> AccountMonitorConfig:
         # one account can be deployed without another nested config file.
         credential_values = values
     api_key, secret_key, key_type = _credential_pair(
-        api_key_env="BINANCE_API_KEY",
-        secret_key_env="BINANCE_SECRET_KEY",
-        key_type_env="BINANCE_KEY_TYPE",
-        sources=[credential_values],
+        sources=[values, credential_values],
     )
     account_id = str(values.get("account_id", "account"))
+    if not re.fullmatch(r"[A-Za-z0-9_-]+", account_id):
+        raise ValueError("account_id must contain only letters, digits, underscores or hyphens")
     credentials = None
     if api_key and secret_key:
         credentials = BinanceCredentials(
             api_key=api_key,
             secret_key=secret_key,
-            subaccount_email=(os.getenv("BINANCE_SUBACCOUNT_EMAIL") or credential_values.get("subaccount_email") or values.get("subaccount_email")),
+            subaccount_email=(values.get("subaccount_email") or credential_values.get("subaccount_email")),
             label=account_id or credential_values.get("label"),
             key_type=str(key_type),
         )
@@ -759,9 +808,6 @@ def load_config(path: Path) -> AccountMonitorConfig:
     # Keep old account files working; new files should use explicit mode.
     spot_mode = str(spot_values.get("mode", "spot" if spot_values.get("enabled", True) else "none")).lower()
     spot_api_key, spot_secret_key, spot_key_type = _credential_pair(
-        api_key_env="BINANCE_SPOT_API_KEY",
-        secret_key_env="BINANCE_SPOT_SECRET_KEY",
-        key_type_env="BINANCE_SPOT_KEY_TYPE",
         sources=[spot_values],
         fallback=(api_key, secret_key, key_type),
     )
@@ -770,7 +816,7 @@ def load_config(path: Path) -> AccountMonitorConfig:
         spot_credentials = BinanceCredentials(
             api_key=spot_api_key,
             secret_key=spot_secret_key,
-            subaccount_email=(os.getenv("BINANCE_SPOT_SUBACCOUNT_EMAIL") or spot_values.get("subaccount_email") or values.get("subaccount_email")),
+            subaccount_email=(spot_values.get("subaccount_email") or values.get("subaccount_email")),
             label=f"{account_id}-spot",
             key_type=str(spot_key_type),
         )
@@ -779,13 +825,20 @@ def load_config(path: Path) -> AccountMonitorConfig:
     uses_pm = spot_mode == "pm_margin" or futures_mode == "pm_um"
     if credentials is None and uses_pm:
         raise SystemExit("Missing PM api_key/secret_key (top-level credentials or credentials_file)")
+    if uses_pm:
+        for mode, product in ((spot_mode, spot_values), (futures_mode, futures_values)):
+            if mode not in {"pm_margin", "pm_um"}:
+                continue
+            pair = _credential_pair(sources=[product], fallback=(api_key, secret_key, key_type))
+            candidate = BinanceCredentials(pair[0], pair[1], key_type=pair[2])
+            if (candidate.api_key, candidate.secret_key, candidate.key_type) != (
+                credentials.api_key, credentials.secret_key, credentials.key_type
+            ):
+                raise ValueError("PM product credentials conflict with the shared PM account credentials")
     if spot_mode == "spot" and spot_credentials is None:
         raise SystemExit("spot.mode=spot requires spot.api_key and spot.secret_key (or top-level credentials for backward compatibility)")
     usdm_values = values.get("usdm", {})
     usdm_api_key, usdm_secret_key, usdm_key_type = _credential_pair(
-        api_key_env="BINANCE_USDM_API_KEY",
-        secret_key_env="BINANCE_USDM_SECRET_KEY",
-        key_type_env="BINANCE_USDM_KEY_TYPE",
         sources=[usdm_values, futures_values],
     )
     usdm_credentials = None
@@ -795,7 +848,7 @@ def load_config(path: Path) -> AccountMonitorConfig:
         )
     if futures_mode == "usdm" and usdm_credentials is None:
         raise SystemExit("futures.mode=usdm requires usdm.api_key and usdm.secret_key")
-    output_dir = Path(values.get("output_dir", "runtime"))
+    output_dir = Path(values.get("output_dir", f"runtime/{account_id}"))
     if not output_dir.is_absolute():
         # Account files live under config/, while runtime data belongs beside
         # config/ at the project root.
@@ -809,6 +862,8 @@ def load_config(path: Path) -> AccountMonitorConfig:
         spot_credentials=spot_credentials,
         proxy=values.get("proxy"),
         pm_usd_to_usdt=float(values.get("pm_usd_to_usdt", 1.0)),
+        hyperliquid=dict(values.get("hyperliquid", {})),
+        report_markets=tuple((leg["exchange"], leg["market"]) for leg in raw_values.get("legs", {}).values()),
         output_dir=output_dir,
         rest_interval_seconds=float(values.get("rest_interval_seconds", 5.0)),
         include_balance=bool(values.get("include_balance", True)),

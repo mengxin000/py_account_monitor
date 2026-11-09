@@ -43,12 +43,21 @@ def build_html(data: ReportData, path: Path) -> Path:
     ]
     metric_headers = "".join(f"<th>{html.escape(str(label))}</th>" for label, _ in metrics)
     metric_values = "".join(f"<td>{_number(value)}</td>" for _, value in metrics)
+    funding_items = "　｜　".join(
+        f"{html.escape(item['label'])}：{item['income']:+.10f} U"
+        for item in data.funding_details()
+    )
+    funding_line = (
+        f"<p style='margin:0 0 16px;color:#333'>{funding_items}"
+        "<br><small style='color:#666'>按本交易日已记录资金费汇总</small></p>"
+        if funding_items else ""
+    )
     stats_headers = "".join(f"<th>{html.escape(str(label))}</th>" for label, _ in stats)
     stats_values = "".join(f"<td>{_number(value)}</td>" for _, value in stats)
     body = f"""<!doctype html><html><head><meta charset='utf-8'><style>
 body{{font-family:Arial,'Microsoft YaHei',sans-serif;color:#111;margin:24px}}h2{{margin:0 0 18px}}table{{border-collapse:collapse;margin:12px 0 24px;min-width:680px}}th,td{{border:1px solid #808080;padding:7px 12px;text-align:center;white-space:nowrap}}th{{background:#1F4E78;color:#fff;font-weight:700}}td{{background:#fff}}.section{{margin-top:22px}}.analysis{{padding:12px 16px;background:#F3F6F9;border-left:4px solid #1F4E78}}
 </style></head><body><h2>{html.escape(data.account_id)} 账户监控日报 - {html.escape(data.day)}</h2>
-<div class='section'><h3>收益与成交量</h3><table><tr>{metric_headers}</tr><tr>{metric_values}</tr></table></div>
+<div class='section'><h3>收益与成交量</h3><table><tr>{metric_headers}</tr><tr>{metric_values}</tr></table>{funding_line}</div>
 <div class='section'><h3>配对统计</h3><table><tr>{stats_headers}</tr><tr>{stats_values}</tr></table></div>
 <div class='section'><h3>基础币汇总</h3><table><tr><th>基础币</th><th>成交量(U)</th><th>配对数</th><th>盈利配对数</th><th>亏损配对数</th><th>未匹配条数</th><th>配对收益</th><th>Exposure配对收益</th></tr>{symbol_rows}</table></div>
 </body></html>"""

@@ -2,9 +2,16 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+from .funding import funding_breakdown
+try:
+    from ..core.models import callback_event
+    from ..replay.batch_replay import load_underlying_alias, _exposure_key, read_trade_sources
+except ImportError:
+    from core.models import callback_event
+    from replay.batch_replay import load_underlying_alias, _exposure_key, read_trade_sources
 
 try:
     from ..core.jsonl_io import iter_jsonl
@@ -18,13 +25,9 @@ def read_jsonl(path: Path) -> list[dict[str, Any]]:
     return [row for _, _, row in iter_jsonl(path)]
 
 
-def base_asset(symbol: object) -> str:
+def base_asset(symbol: object, aliases: dict[str, str] | None = None) -> str:
     """Return the report/matcher base for USDT and USDC quoted symbols."""
-    normalized = str(symbol or "UNKNOWN").strip().upper()
-    for quote in ("USDT", "USDC"):
-        if normalized.endswith(quote) and len(normalized) > len(quote):
-            return normalized[: -len(quote)]
-    return normalized or "UNKNOWN"
+    return _exposure_key(str(symbol or "UNKNOWN"), aliases)
 
 
 @dataclass(slots=True)
@@ -47,6 +50,11 @@ class ReportData:
     current_positions: Any = None
     equity_state_present: bool = False
     equity_scope: str = "legacy_pm"
+    underlying_alias: dict[str, str] = field(default_factory=load_underlying_alias)
+    funding_markets: list[tuple[str, str]] = field(default_factory=list)
+
+    def funding_details(self) -> list[dict[str, Any]]:
+        return funding_breakdown(self.funding, self.funding_markets)
 
     @property
     def profit_summary(self) -> dict[str, Any]:
@@ -172,12 +180,12 @@ class ReportData:
             "exposure_quantity": 0.0, "exposure_profit": 0.0,
         })
         for symbol, count in self.fill_counts.items():
-            base = base_asset(symbol)
+            base = base_asset(symbol, self.underlying_alias)
             summary[base]["symbol"] = base
             summary[base]["fill_count"] += count
             summary[base]["volume"] += self.fill_volumes.get(symbol, 0.0)
         for row in self.matches:
-            base = base_asset(row.get("current_symbol") or row.get("match_symbol"))
+            base = base_asset(row.get("current_symbol") or row.get("match_symbol"), self.underlying_alias)
             item = summary[base]
             item["symbol"] = base
             item["match_count"] += 1
@@ -188,31 +196,30 @@ class ReportData:
             item["loss_count"] += int(profit < 0)
             item["fees"] += float(row.get("current_fee", 0) or 0) + float(row.get("match_fee", 0) or 0)
         for row in self.unmatched:
-            base = base_asset(row.get("symbol"))
+            base = base_asset(row.get("symbol"), self.underlying_alias)
             summary[base]["symbol"] = base
             summary[base]["unmatched_count"] += 1
         for row in self.exposure_remain:
-            base = base_asset(row.get("symbol"))
+            base = base_asset(row.get("symbol"), self.underlying_alias)
             summary[base]["unmatched_quantity"] += float(row.get("quantity", 0) or 0)
         for row in self.exposure_matches:
-            base = base_asset(row.get("symbol"))
+            base = base_asset(row.get("symbol"), self.underlying_alias)
             summary[base]["symbol"] = base
             summary[base]["exposure_quantity"] += float(row.get("quantity", 0) or 0)
             summary[base]["exposure_profit"] += float(row.get("profit_delta", 0) or 0)
         return sorted(summary.values(), key=lambda x: x["symbol"])
 
 
-def load_report_data(day_dir: Path, account_id: str) -> ReportData:
+def load_report_data(day_dir: Path, account_id: str, *, aliases: dict[str, str] | None = None,
+                     trade_sources: dict[str, list] | None = None) -> ReportData:
+    aliases = load_underlying_alias() if aliases is None else dict(aliases)
     fill_counts: dict[str, int] = defaultdict(int)
     fill_volumes: dict[str, float] = defaultdict(float)
-    for path in sorted(day_dir.glob("*.jsonl")):
-        if path.name == "all_callbacks.jsonl":
-            continue
-        if path.name in {"account_info.jsonl", "matches.jsonl", "unmatched.jsonl", "exposure_matches.jsonl", "exposure_remain.jsonl", "funding.jsonl"}:
-            continue
-        events = read_jsonl(path)
-        for event in events:
-            data = event.get("data", event)
+    sources = read_trade_sources(day_dir) if trade_sources is None else trade_sources
+    for filename, rows in sorted(sources.items()):
+        path = Path(filename)
+        for _, _, event in rows:
+            data = callback_event(event)
             nested_order = data.get("o") if isinstance(data, dict) else None
             order = nested_order if isinstance(nested_order, dict) else data
             symbol = str(order.get("s", order.get("symbol", event.get("symbol", path.stem))) or path.stem).upper()
@@ -222,7 +229,8 @@ def load_report_data(day_dir: Path, account_id: str) -> ReportData:
                 # and last-filled price so partial fills are not counted twice.
                 quantity = float(order.get("l", order.get("lastExecutedQty", 0)) or 0)
                 price = float(order.get("L", order.get("lastExecutedPrice", 0)) or 0)
-                fill_volumes[symbol] += quantity * price
+                rate = data.get("_valuationRates", {}).get("USDC", 1) if symbol.endswith("USDC") else 1
+                fill_volumes[symbol] += quantity * price * float(rate)
             except (AttributeError, TypeError, ValueError):
                 continue
     snapshots = [row for row in read_jsonl(day_dir / "account_info.jsonl") if row.get("recordType") == "account_snapshot"]
@@ -240,6 +248,7 @@ def load_report_data(day_dir: Path, account_id: str) -> ReportData:
     except (TypeError, ValueError):
         baseline_equity = None
     return ReportData(
+        underlying_alias=aliases,
         account_id=account_id,
         day=day_dir.name,
         matches=(

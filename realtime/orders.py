@@ -12,7 +12,9 @@ class Orders:
     def key(scope, symbol, order_id): return scope, symbol, str(order_id)
 
     def event(self,row):
-        event = row.get("data",row)
+        if row.get("normalizedOrder"):
+            return  # Individual executions cannot close a still-partially-open order.
+        event = row.get("orderView", row.get("data",row))
         order = event.get("o") if isinstance(event.get("o"),dict) else event
         scope = row.get("accountScope") or str(event.get("fs", "unknown")).lower()
         if not order.get("s") or "i" not in order: return
@@ -22,7 +24,7 @@ class Orders:
         if at < max(self.times.get(key,0),self.snapshot_at.get(scope,0)): return
         self.times[key] = at
         if order.get("X") in {"NEW","PARTIALLY_FILLED","PENDING_NEW"}:
-            self.rows[key] = {"scope":scope,"market":"spot" if scope in {"spot","pm_margin"} else scope,
+            self.rows[key] = {"scope":scope,"market":"spot" if scope in {"spot","pm_margin"} else "um" if scope == "usdm" else scope,
                               "symbol":order["s"],"orderId":str(order["i"]),"clientId":order.get("c",""),
                               "side":order.get("S"),"price":order.get("p"),
                               "remaining":max(0,float(order.get("q",0))-float(order.get("z",0))),"asOf":at}
@@ -36,7 +38,7 @@ class Orders:
         for row in rows:
             key = self.key(scope,row["symbol"],row["orderId"])
             if self.times.get(key,0)>at: continue
-            self.rows[key] = {"scope":scope,"market":"spot" if scope in {"spot","pm_margin"} else scope,
+            self.rows[key] = {"scope":scope,"market":"spot" if scope in {"spot","pm_margin"} else "um" if scope == "usdm" else scope,
                               "symbol":row["symbol"],"orderId":str(row["orderId"]),"clientId":row.get("clientOrderId",""),
                               "side":row["side"],"price":row["price"],
                               "remaining":max(0,float(row["origQty"])-float(row.get("executedQty",0))),"asOf":at}

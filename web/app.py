@@ -78,7 +78,7 @@ class LiveData:
                         self.orders[account].reconcile(message["scope"],message["rows"],message["asOf"])
             except queue.Empty: pass
             await asyncio.to_thread(self.refresh)
-            keys = {(x["market"],x["symbol"]) for orders in self.orders.values() for x in orders.rows.values() if x["market"] in {"spot","um"}}
+            keys = {("um" if x["market"] == "usdm" else x["market"],x["symbol"]) for orders in self.orders.values() for x in orders.rows.values() if x["market"] in {"spot","um","usdm","hyperliquid"}}
             for watched in self.watchers.values(): keys.update(watched)
             self.depth.request(keys)
             await asyncio.sleep(.5)
@@ -210,7 +210,7 @@ def make_app(live,config):
             for leg in legs[:2]:
                 if not isinstance(leg,dict): return ws
                 market,symbol=leg.get("market"),str(leg.get("symbol","")).upper()
-                if market not in {"spot","um"} or not re.fullmatch(r"[A-Z0-9]{2,30}",symbol): return ws
+                if market not in {"spot","um","hyperliquid"} or not re.fullmatch(r"[A-Z0-9_.:-]{1,60}",symbol): return ws
                 keys.append((market,symbol))
             live.watchers[key]=set(keys)
             incremental = hello.get("protocol") == 2
@@ -240,7 +240,7 @@ def make_app(live,config):
                         for leg in selected_legs[:2]:
                             if not isinstance(leg, dict): return
                             market, symbol = leg.get("market"), str(leg.get("symbol", "")).upper()
-                            if market not in {"spot", "um"} or not re.fullmatch(r"[A-Z0-9]{2,30}", symbol):
+                            if market not in {"spot", "um", "hyperliquid"} or not re.fullmatch(r"[A-Z0-9_.:-]{1,60}", symbol):
                                 return
                             selected_keys.append((market, symbol))
                         account, keys = selected, selected_keys

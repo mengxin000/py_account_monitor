@@ -25,12 +25,12 @@ class MarketStore:
     def write_batch(self, records):
         grouped = {}
         for market, symbol, record, metadata in records:
-            if market not in {"spot", "futures"} or not re.fullmatch(r"[A-Z0-9_]+", symbol):
+            if market not in {"spot", "futures", "hyperliquid"} or not re.fullmatch(r"[A-Z0-9][A-Z0-9_.:-]*", symbol):
                 raise ValueError("invalid market archive key")
             # Bucket using capture time, never writer/parse time.
             micros = record.get("receivedTimeUs", record["receivedTimeMs"] * 1000)
             moment = datetime.fromtimestamp(micros // 1_000_000)
-            directory = self.root / moment.strftime("%Y%m%d") / market / symbol
+            directory = self.root / moment.strftime("%Y%m%d") / market / symbol.replace(":", "%3A")
             path = directory / ("windows.jsonl" if metadata else moment.strftime("%H.jsonl"))
             grouped.setdefault(path, []).append(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
         for path, lines in grouped.items():

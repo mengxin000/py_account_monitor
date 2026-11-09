@@ -19,6 +19,11 @@ except ImportError:
 def normalize_depth(market, payload, envelope):
     stream = payload.get("stream", "")
     data = payload.get("data", payload)
+    if market == "hyperliquid":
+        if payload.get("channel") != "l2Book": return None
+        data = {"s": data["coin"].upper(), "E": data["time"],
+                "bids": [[x["px"],x["sz"]] for x in data["levels"][0]],
+                "asks": [[x["px"],x["sz"]] for x in data["levels"][1]]}
     symbol = data.get("s") or stream.split("@")[0].upper()
     bids, asks = data.get("bids", data.get("b")), data.get("asks", data.get("a"))
     if not symbol or not isinstance(bids,list) or not isinstance(asks,list): return None
@@ -35,6 +40,38 @@ def depth_worker(market, commands, output, stop, proxy):
     def running():
         return not stop.is_set() and (parent is None or parent.is_alive())
     async def run():
+        if market == "hyperliquid":
+            try:
+                from ..connections.hyperliquid.market_stream import market_stream
+            except ImportError:
+                from connections.hyperliquid.market_stream import market_stream
+            desired_hl = set()
+            def desired_symbols():
+                nonlocal desired_hl
+                try:
+                    while True: desired_hl = set(commands.get_nowait())
+                except queue.Empty: pass
+                return desired_hl
+            def publish_hl(envelope):
+                row = {"market":market,"envelope":envelope}
+                try: output.put_nowait(row)
+                except queue.Full:
+                    try: output.get_nowait()
+                    except queue.Empty: pass
+                    try: output.put_nowait(row)
+                    except queue.Full: pass
+            while running():
+                try:
+                    if not desired_symbols():
+                        await asyncio.sleep(.2)
+                        continue
+                    async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None,sock_connect=10),trust_env=True) as session:
+                        await market_stream(session,"l2Book",desired_symbols,publish_hl,running,proxy)
+                except Exception as exc:
+                    try: output.put_nowait({"market":market,"error":type(exc).__name__})
+                    except queue.Full: pass
+                    await asyncio.sleep(3)
+            return
         endpoint = "wss://stream.binance.com:443/stream" if market == "spot" else "wss://fstream.binance.com/stream"
         desired = set()
         dropped = 0
@@ -114,7 +151,7 @@ class DepthService:
 
     def request(self, keys):
         ctx = multiprocessing.get_context("spawn")
-        for market in ("spot","um"):
+        for market in ("spot","um","hyperliquid"):
             symbols = sorted(s for m,s in keys if m==market)[:100]
             if symbols and market not in self.workers:
                 commands, output, stop = ctx.Queue(2),ctx.Queue(4096),ctx.Event()

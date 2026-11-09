@@ -67,17 +67,30 @@ async def _supervise(monitors,root,config,proxy):
         async def orders():
             while True:
                 for monitor in monitors:
-                    routes=[("pm_margin",monitor.rest,"/papi/v1/margin/openOrders"),("um",monitor.rest,"/papi/v1/um/openOrders")]
+                    routes=[]
+                    if monitor.rest and monitor.config.spot_mode == "pm_margin":
+                        routes.append(("pm_margin",monitor.rest,"/papi/v1/margin/openOrders"))
+                    if monitor.rest and monitor.config.futures_mode == "pm_um":
+                        routes.append(("um",monitor.rest,"/papi/v1/um/openOrders"))
+                    if monitor.usdm_rest:
+                        routes.append(("usdm",monitor.usdm_rest,"/fapi/v1/openOrders"))
                     if monitor.spot_stream: routes.append(("spot",monitor.spot_stream.rest,"/api/v3/openOrders"))
                     for scope,rest,path in routes:
                         at=int(time.time()*1000)
                         try:
                             response=await rest.get(path,signed=True)
-                            rows=response.get("data",[])
+                            rows=response if isinstance(response,list) else response.get("data",[])
                             if not isinstance(rows,list): raise ValueError("invalid openOrders")
                             publish({"kind":"orders","account":monitor.config.account_id,"scope":scope,"asOf":at,"rows":rows})
                         except Exception:
                             LOGGER.warning("dashboard order reconciliation failed account=%s scope=%s",monitor.config.account_id,scope)
+                    if monitor.hyperliquid:
+                        at=int(time.time()*1000)
+                        try:
+                            rows=await monitor.hyperliquid.open_orders()
+                            publish({"kind":"orders","account":monitor.config.account_id,"scope":"hyperliquid","asOf":at,"rows":rows})
+                        except Exception:
+                            LOGGER.warning("dashboard Hyperliquid order reconciliation failed account=%s", monitor.config.account_id, exc_info=True)
                 await asyncio.sleep(60)
         order_task=asyncio.create_task(orders())
         try:

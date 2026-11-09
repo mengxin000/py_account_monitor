@@ -108,10 +108,12 @@ class MarketCollector:
             market, order = "futures", event.get("o", {})
         elif event_type == "executionReport":
             market, order = "spot", event
+        elif event_type == "HYPERLIQUID_ORDER":
+            market, order = "hyperliquid", event
         else:
             return
         symbol = str(order.get("s", "")).upper()
-        if not re.fullmatch(r"[A-Z0-9_]+", symbol):
+        if not re.fullmatch(r"[A-Z0-9][A-Z0-9_.:-]*", symbol):
             return
         now = time.time()
         key = market, symbol
@@ -121,7 +123,9 @@ class MarketCollector:
         order_id = str(order.get("i", order.get("c", "")))
         scope = event.get("_accountScope")
         identity = account, f"{scope}:{order_id}" if scope else order_id
-        if order.get("X") in {"NEW", "PARTIALLY_FILLED", "PENDING_NEW"}:
+        if order.get("X") == "EXECUTION_ONLY":
+            pass  # Fills do not convey whether a Hyperliquid order is still open.
+        elif order.get("X") in {"NEW", "PARTIALLY_FILLED", "PENDING_NEW"}:
             state.orders.add(identity)
         else:
             state.orders.discard(identity)
@@ -180,6 +184,12 @@ class MarketCollector:
         try:
             payload = json.loads(envelope["rawPayload"])
             event = payload.get("data", payload)
+            if market == "hyperliquid":
+                if payload.get("channel") != "bbo": return
+                bid, ask = event["bbo"]
+                if bid is None or ask is None: return
+                event = {"s": event["coin"].upper(), "E": event["time"],
+                         "b": bid["px"], "B": bid["sz"], "a": ask["px"], "A": ask["sz"]}
             key = market, str(event.get("s", "")).upper()
             if key in self.states:
                 self.quote_event(key, event, envelope["receivedTimeUs"] / 1_000_000, envelope)
@@ -236,6 +246,34 @@ class MarketCollector:
 
     async def stream(self, market):
         """Maintain one dynamically subscribed bookTicker socket per market."""
+        if market == "hyperliquid":
+            try:
+                from ..connections.hyperliquid.market_stream import market_stream
+            except ImportError:
+                from connections.hyperliquid.market_stream import market_stream
+            while not self.stopping:
+                try:
+                    def receive(envelope):
+                        if self.raw_sink is not None:
+                            self.raw_sink(envelope)
+                        else:
+                            self.ingest_raw(market, envelope)
+                    def on_open():
+                        for m, symbol in self.states:
+                            if m == market:
+                                self.emit((m, symbol), {"kind":"connected", "receivedTimeMs":time.time_ns()//1_000_000}, True)
+                    await market_stream(self.session,"bbo",
+                        lambda: [s for m,s in self.states if m==market], receive,
+                        lambda: not self.stopping,self.proxy,on_open)
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    LOGGER.warning("Hyperliquid public stream reconnecting",exc_info=True)
+                    for m, symbol in self.states:
+                        if m == market:
+                            self.emit((m, symbol), {"kind":"disconnected", "receivedTimeMs":time.time_ns()//1_000_000}, True)
+                    await asyncio.sleep(3)
+            return
         url = "wss://stream.binance.com:9443/ws" if market == "spot" else "wss://fstream.binance.com/ws"
         delay = 1
         request_id = 0
@@ -346,6 +384,27 @@ class MarketCollector:
         while not self.stopping:
             for monitor in monitors:
                 account = monitor.config.account_id
+                hl = getattr(monitor, "hyperliquid", None)
+                if hl:
+                    revision = self.revisions.get((account, "hyperliquid"), 0)
+                    try:
+                        rows = await hl.open_orders()
+                        if revision == self.revisions.get((account, "hyperliquid"), 0):
+                            now = time.time()
+                            for key, state in self.states.items():
+                                if key[0] == "hyperliquid":
+                                    state.orders = {x for x in state.orders if x[0] != account}
+                            for row in rows:
+                                state = self.ensure(("hyperliquid", row["symbol"].upper()), now)
+                                state.orders.add((account, "hyperliquid:" + row["orderId"]))
+                            for key, state in self.states.items():
+                                if key[0] == "hyperliquid":
+                                    if state.orders: state.idle_since = 0
+                                    elif not state.idle_since: state.idle_since = now
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        LOGGER.warning("Hyperliquid open orders reconciliation failed account=%s", account, exc_info=True)
                 sources = []
                 legacy_config = not hasattr(monitor.config, "spot_mode")
                 spot_mode = getattr(monitor.config, "spot_mode", "pm_margin")
@@ -464,7 +523,7 @@ class MarketCollector:
                             self.emit(key, {"kind": "unsubscribed", "receivedTimeMs": int(now*1000)}, True)
                             del self.states[key]
                             LOGGER.info("market unsubscribed market=%s symbol=%s", *key)
-                    for market in ("spot", "futures"):
+                    for market in ("spot", "futures", "hyperliquid"):
                         active = any(current_market == market for current_market, _ in self.states)
                         task = self.market_tasks.get(market)
                         if active and (task is None or task.done()):

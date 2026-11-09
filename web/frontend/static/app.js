@@ -79,6 +79,7 @@ function render(data) {
   warning(issues.join(" "));
   const s=data.summary, a=data.status;
   const metrics=[["总权益 / U",data.collectorStale?null:a.total_equity],["实际损益 / U",data.collectorStale?null:a.actual_profit],["交易损益 · 暂算 / U",s.tradeProfit],["普通配对",s.pairCount,0],["未匹配条数",s.unmatchedCount,0],["MMR",a.unimmr,0]];
+  if(a.private_streams?.hyperliquid && a.private_streams.hyperliquid!=="DISABLED") metrics.push(["Hyperliquid权益 / U",data.collectorStale?null:a.hyperliquid_equity],["Hyperliquid MMR",a.hyperliquid_mmr,0]);
   const metricSignature=JSON.stringify(metrics);
   if(metricSignature!==metricsKey) {
     metricsKey=metricSignature;
@@ -132,7 +133,9 @@ const columns={
 };
 function cells(row) {
   if(kind==="orders") return [row.scope,row.symbol,row.side,row.price,number(row.remaining),row.clientId];
-  if(kind==="recentTrades") {const e=row.data||row,o=typeof e.o==="object"?e.o:e; return [clock(o.T||e.T),row.accountScope||e.fs||"—",o.s,o.S,tradeDecimal(o.l),tradeDecimal(o.L),tradeDecimal(o.n)+" / "+(o.N||"—")];}
+  if(kind==="recentTrades") {
+    if(row.normalizedOrder) {const o=row.normalizedOrder;return [clock(o.time_ms),o.exchange,o.symbol,o.side,tradeDecimal(o.quantity),tradeDecimal(row.nativePrice||o.price),tradeDecimal(row.commission??o.fee)+" / "+o.fee_currency];}
+    const e=row.data||row,o=typeof e.o==="object"?e.o:e; return [clock(o.T||e.T),row.accountScope||e.fs||"—",o.s,o.S,tradeDecimal(o.l),tradeDecimal(o.L),tradeDecimal(o.n)+" / "+(o.N||"—")];}
   if(kind==="matches") {
     const order=String(row.current_symbol||"").toUpperCase(),hedge=String(row.match_symbol||"").toUpperCase();
     const pair=order&&hedge?order+"_"+hedge:order||hedge;

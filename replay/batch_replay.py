@@ -17,6 +17,10 @@ from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+try:
+    from ..core.models import callback_event
+except ImportError:
+    from core.models import callback_event
 
 try:
     from ..core.legacy_matching import LegacyMatcher
@@ -77,9 +81,8 @@ def _exposure_key(symbol: str, aliases: dict[str, str] | None = None) -> str:
     return aliases.get(base, base) or "__UNKNOWN__"
 
 
-def replay_day(day_dir: Path) -> dict[str, Any]:
-    aliases = load_underlying_alias()
-    events: list[tuple[int, str, int, int, dict[str, Any]]] = []
+def read_trade_sources(day_dir: Path) -> dict[str, list]:
+    """Capture each source once so replay and report use the same fill boundary."""
     generated_files = {
         "all_callbacks.jsonl",
         "account_info.jsonl",
@@ -89,14 +92,21 @@ def replay_day(day_dir: Path) -> dict[str, Any]:
         "exposure_matches.jsonl",
         "exposure_remain.jsonl",
     }
-    for path in sorted(day_dir.glob("*.jsonl")):
+    return {path.name: list(iter_jsonl(path)) for path in sorted(day_dir.glob("*.jsonl"))
+            if path.name not in generated_files}
+
+
+def replay_day(day_dir: Path, *, aliases: dict[str, str] | None = None,
+               trade_sources: dict[str, list] | None = None) -> dict[str, Any]:
+    aliases = load_underlying_alias() if aliases is None else dict(aliases)
+    events: list[tuple[int, str, int, int, dict[str, Any]]] = []
+    sources = read_trade_sources(day_dir) if trade_sources is None else trade_sources
+    for filename, rows in sorted(sources.items()):
         # Replay only original per-symbol trade callback files. Feeding a
         # generated residual back into the matcher creates a phantom order
         # with no Binance client/system ID on every subsequent report run.
-        if path.name in generated_files:
-            continue
-        for line_no, object_no, record in iter_jsonl(path):
-            event = record.get("data", record)
+        for line_no, object_no, record in rows:
+            event = callback_event(record)
             if not isinstance(event, dict):
                 continue
             event = dict(event)
@@ -104,7 +114,7 @@ def replay_day(day_dir: Path) -> dict[str, Any]:
                 if key in record:
                     event[key] = record[key]
             event_time = _event_time(event)
-            events.append((event_time, path.name, line_no, object_no, event))
+            events.append((event_time, filename, line_no, object_no, event))
     # Do not combine the line number into a string tie-breaker: lexical order
     # places line 10 before line 9. Binance can emit PARTIALLY_FILLED and
     # FILLED callbacks with the same millisecond timestamp, so preserve their
