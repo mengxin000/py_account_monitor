@@ -1,20 +1,22 @@
 {
   "account_id": "dh",
-  "api_key": "paste-dh-spot-api-key",
-  "secret_key": "paste-dh-spot-secret-key",
-  "subaccount_email": "binance-sub-03@example.com",
   "output_dir": "runtime/dh",
   "rest_interval_seconds": 5,
-  "include_balance": true,
-  "balance_interval_seconds": 60,
-  "spot": {
-    "mode": "spot"
-  },
-  "futures": {
-    "mode": "usdm"
-  },
-  "usdm": {
-    "api_key": "paste-dh-futures-api-key",
-    "secret_key": "paste-dh-futures-secret-key"
+  "legs": {
+    "binance": {
+      "exchange": "binance",
+      "market": "spot",
+      "credentials": {
+        "api_key": "填写币安API_KEY",
+        "secret_key": "填写对应凭证",
+        "key_type": "auto"
+      }
+    },
+    "hedge": {
+      "exchange": "hyperliquid",
+      "market": "perp",
+      "address": "0x这里替换为实际账户地址",
+      "usdc_to_usdt": 1.0
+    }
   }
 }

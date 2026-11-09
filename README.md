@@ -4,6 +4,8 @@ Hyperliquid统一账户永续与Binance现货/永续的组合配置、订单关�
 
 ## 多账户独立组合
 
+终端按账户分块显示配置中的市场权益，不再固定保留 PM / USDM / Spot 三组列。`legs` 按配置顺序显示；旧式配置按 `spot`、`futures`、`hyperliquid` 在文件中出现的顺序显示，停用市场不占列。每条腿下显示 REST、私有流和整数 MMR；同一 PM 账户的现货和期货注明共用权益，不展示成两份独立资产。
+
 邮件“收益与成交量”表下显示各配置市场的当日资费明细：不同交易所显示如“Binance资费 / Hyperliquid资费”，同一交易所按市场区分如“Binance现货资费 / Binance USDM资费”。原表的“费率损益”仍为合计，收益公式及 Excel 不变。明细是当前交易日已写入 `funding.jsonl` 的金额，零不代表接口健康；历史记录来源不明确时单列“未归属资费”，不强行归到某一条腿。
 
 `config/accounts.local.json` 的 `accounts` 列表继续引用各单账户配置；每份配置独立选择 Binance / Hyperliquid 组合，不要求所有账户使用同一方案。启动命令不变：`uv run binance-monitor`。

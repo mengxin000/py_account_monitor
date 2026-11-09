@@ -853,6 +853,16 @@ def load_config(path: Path) -> AccountMonitorConfig:
         # Account files live under config/, while runtime data belongs beside
         # config/ at the project root.
         output_dir = path.parent.parent / output_dir
+    if "legs" in raw_values:
+        report_markets = tuple((leg["exchange"], leg["market"]) for leg in raw_values["legs"].values())
+    else:
+        selections = {
+            "spot": ("binance", spot_mode) if spot_mode != "none" else None,
+            "futures": ("binance", futures_mode) if futures_mode != "none" else None,
+            "hyperliquid": ("hyperliquid", "perp") if values.get("hyperliquid", {}).get("enabled", False) else None,
+        }
+        order = dict.fromkeys([*raw_values, *selections])
+        report_markets = tuple(selections[key] for key in order if selections.get(key))
     return AccountMonitorConfig(
         account_id=account_id,
         credentials=credentials,
@@ -863,7 +873,7 @@ def load_config(path: Path) -> AccountMonitorConfig:
         proxy=values.get("proxy"),
         pm_usd_to_usdt=float(values.get("pm_usd_to_usdt", 1.0)),
         hyperliquid=dict(values.get("hyperliquid", {})),
-        report_markets=tuple((leg["exchange"], leg["market"]) for leg in raw_values.get("legs", {}).values()),
+        report_markets=report_markets,
         output_dir=output_dir,
         rest_interval_seconds=float(values.get("rest_interval_seconds", 5.0)),
         include_balance=bool(values.get("include_balance", True)),

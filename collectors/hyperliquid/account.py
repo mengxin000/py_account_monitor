@@ -192,22 +192,37 @@ class HyperliquidCollector:
         if not isinstance(balances, list):
             raise ValueError("Hyperliquid unified balances unavailable")
         tokens = {int(t["index"]): t["name"] for t in spot_meta["tokens"]}
+        spot_contexts = None
+
+        async def conversion_rate(coin):
+            """Load spot valuation only for assets actually needed by this account."""
+            nonlocal spot_contexts
+            if coin not in conversion:
+                if spot_contexts is None:
+                    spot_contexts = await self.rest.info("spotMetaAndAssetCtxs")
+                # Preserve explicitly configured rates. Only use positive,
+                # finite spot marks with an already valued quote currency.
+                for pair, ctx in zip(spot_contexts[0]["universe"], spot_contexts[1]):
+                    base, quote = (tokens.get(int(i)) for i in pair["tokens"])
+                    if base and base not in conversion and quote in conversion:
+                        try:
+                            price = float(ctx.get("markPx"))
+                            value = price * conversion[quote]
+                        except (TypeError, ValueError):
+                            continue
+                        if math.isfinite(value) and value > 0:
+                            conversion[base] = value
+            if coin not in conversion:
+                raise ValueError(f"cannot value active Hyperliquid asset/collateral {coin}: missing spot conversion rate")
+            return conversion[coin]
+
         total = 0.0
         for row in balances:
             amount = float(row["total"])
             if not amount:
                 continue
             coin = row["coin"]
-            if coin not in conversion:
-                # Obtain token prices from the spot universe, never a perpetual mark.
-                contexts = await self.rest.info("spotMetaAndAssetCtxs")
-                for pair, ctx in zip(contexts[0]["universe"], contexts[1]):
-                    base, quote = (tokens.get(int(i)) for i in pair["tokens"])
-                    if base and quote in conversion and ctx.get("markPx") is not None:
-                        conversion[base] = float(ctx["markPx"]) * conversion[quote]
-                if coin not in conversion:
-                    raise ValueError(f"cannot value unified-account asset {coin}")
-            total += amount * conversion[coin]
+            total += amount * await conversion_rate(coin)
         positions = []
         max_ratio = 0.0
         maintenance_by_token, isolated_by_token = {}, {}
@@ -219,20 +234,37 @@ class HyperliquidCollector:
             self.perp_states = dict(await asyncio.gather(*(query(dex) for dex in dex_meta)))
             self.perp_states_at = time.monotonic()
         for dex, meta in dex_meta.items():
-            state = self.perp_states.get(dex, {"assetPositions":[], "crossMaintenanceMarginUsed":0})
-            collateral = tokens.get(int(meta.get("collateralToken", 0)), "USDC")
-            if collateral not in conversion:
-                raise ValueError(f"missing collateral conversion rate for {collateral}")
-            isolated = 0.0
+            state = self.perp_states.get(dex)
+            if state is None:
+                # An absent WS state is not proof of an empty account.
+                state = await self.rest.info("clearinghouseState", user=self.address, dex=dex)
+                self.perp_states[dex] = state
+            active_positions = []
             for row in state["assetPositions"]:
                 p = row["position"]
-                total += float(p["unrealizedPnl"]) * conversion[collateral]
+                values = [float(p.get(key, 0) or 0) for key in ("szi", "unrealizedPnl", "marginUsed")]
+                if not all(math.isfinite(value) for value in values):
+                    raise ValueError(f"Hyperliquid position non-finite dex={dex}")
+                if any(values):
+                    active_positions.append(row)
+            maintenance = float(state["crossMaintenanceMarginUsed"])
+            margin_used = [float(state.get(key, {}).get("totalMarginUsed", 0) or 0)
+                           for key in ("marginSummary", "crossMarginSummary")]
+            if not all(math.isfinite(value) for value in [maintenance, *margin_used]):
+                raise ValueError(f"Hyperliquid margin non-finite dex={dex}")
+            if not active_positions and maintenance == 0 and not any(margin_used):
+                continue  # No exposure: this DEX's collateral needs no valuation.
+            collateral = tokens.get(int(meta.get("collateralToken", 0)))
+            if collateral is None:
+                raise ValueError(f"unknown Hyperliquid collateral token dex={dex}")
+            collateral_rate = await conversion_rate(collateral)
+            isolated = 0.0
+            for row in active_positions:
+                p = row["position"]
+                total += float(p["unrealizedPnl"]) * collateral_rate
                 if p.get("leverage", {}).get("type") == "isolated":
                     isolated += float(p["marginUsed"])
                 positions.append({**p, "dex": dex})
-            balance = sum(float(b["total"]) for b in balances if b["coin"] == collateral)
-            available = balance - isolated
-            maintenance = float(state["crossMaintenanceMarginUsed"])
             maintenance_by_token[collateral] = maintenance_by_token.get(collateral, 0) + maintenance
             isolated_by_token[collateral] = isolated_by_token.get(collateral, 0) + isolated
         for collateral, maintenance in maintenance_by_token.items():
