@@ -1,4 +1,4 @@
-"""Translate explicit legs into the existing Binance modes plus an HL adapter."""
+"""Resolve account-local Binance, Hyperliquid and OKX leg configuration."""
 import math
 import re
 from .credentials import credential_pair

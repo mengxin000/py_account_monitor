@@ -1,3 +1,5 @@
+"""Email settings and the optional standalone report configuration loader."""
+
 from __future__ import annotations
 
 import json

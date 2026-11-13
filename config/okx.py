@@ -1,4 +1,4 @@
-"""Opt-in configuration for the collection-only OKX adapter."""
+"""Validate OKX settings for the integrated service and standalone collector."""
 import json
 import math
 import os

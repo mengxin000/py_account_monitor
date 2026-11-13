@@ -8,7 +8,34 @@ Hyperliquid统一账户永续与Binance现货/永续的组合配置、订单关�
 
 邮件“收益与成交量”表下显示各配置市场的当日资费明细：不同交易所显示如“Binance资费 / Hyperliquid资费”，同一交易所按市场区分如“Binance现货资费 / Binance USDM资费”。原表的“费率损益”仍为合计，收益公式及 Excel 不变。明细是当前交易日已写入 `funding.jsonl` 的金额，零不代表接口健康；历史记录来源不明确时单列“未归属资费”，不强行归到某一条腿。
 
-`config/accounts.local.json` 的 `accounts` 列表继续引用各单账户配置；每份配置独立选择 Binance / Hyperliquid 组合，不要求所有账户使用同一方案。启动命令不变：`uv run binance-monitor`。
+`config/accounts.local.json` 的 `accounts` 列表继续引用各单账户配置；每份配置独立选择 Binance / Hyperliquid / OKX 组合，不要求所有账户使用同一方案。启动命令不变：`uv run binance-monitor`。
+
+### 最新账户示例与配置模块
+
+三个 `config/account_*.local.example.json` 均采用 `legs`，仅为填写参考，不会自动加载或覆盖实际 `.local.json`：
+
+| 示例文件 | 第一条腿 | 第二条腿 |
+|---|---|---|
+| `account_dh.local.example.json` | Binance spot | Hyperliquid perp |
+| `account_mfx.local.example.json` | Hyperliquid perp | OKX perp |
+| `account_zdl.local.example.json` | Hyperliquid perp | OKX perp |
+
+`first`、`second` 是腿名称，不是固定交易所。每个账户分别填写自己的实际账户地址和凭证，Hyperliquid 的地址占位文字必须替换为真实的 `0x` 加 40 位十六进制地址（不是代理钱包地址）。
+OKX 需填写 API Key、Secret Key、Passphrase；Binance 的 `key_type: auto` 沿用自动识别签名类型。
+`usd_to_usdt`/`usdc_to_usdt` 的 1.0 是估值假设，不是自动获取的实时汇率。`token_rates` 用于其他币种换算，`symbol_map` 用于交易对名称映射；两者都不是订单配对规则表。
+普通配对规则仍在 `core/order_linking.py::RULE_TABLE` 维护，示例不再添加 `matching_rules`。
+主服务按顶层 `rest_interval_seconds` 采集权益；OKX 的 `reconcile_interval_seconds` 是成交/资金费核对间隔，另有成交触发和报告前核对。更多限制见 [OKX 接入说明](docs/OKX.md)。
+
+`config/` 既包含配置数据，也包含读取与校验代码，职责如下，无需移到连接或采集目录：
+
+| 模块 | 职责 |
+|---|---|
+| `credentials.py` | 读取账户明确指定的 Binance 密钥或环境变量，检查凭证成对性；不负责实际签名 |
+| `legs.py` | 解析交易所/市场组合，检查腿数量、共享账户及凭证一致性 |
+| `okx.py` | OKX 配置类型、三项凭证、地址、间隔校验；供主服务与独立采集共用 |
+| `settings.py` | 邮件配置，以及可选独立报表命令的配置加载；不是整个监控程序的统一设置入口 |
+
+这些模块不存真实密钥，也不运行采集连接；网络请求和签名在 `connections/`，采集调度在 `collectors/`。实际账户配置的加载入口目前仍在 `collectors/account_monitor.py::load_config`，本次不为整理目录改变它。
 
 - 每个 `account_id` 必须唯一，仅使用字母、数字、下划线或连字符。
 - 未指定 `output_dir` 时，原始数据默认写入 `runtime/<account_id>`；已显式设置的路径保留。不同账户的运行目录不得相同或相互嵌套，启动时会检查。

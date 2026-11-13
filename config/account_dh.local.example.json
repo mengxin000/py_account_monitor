@@ -3,20 +3,22 @@
   "output_dir": "runtime/dh",
   "rest_interval_seconds": 5,
   "legs": {
-    "binance": {
+    "first": {
       "exchange": "binance",
       "market": "spot",
       "credentials": {
-        "api_key": "填写币安API_KEY",
-        "secret_key": "填写对应凭证",
+        "api_key": "填写dh的币安API_KEY",
+        "secret_key": "填写dh对应的币安凭证",
         "key_type": "auto"
       }
     },
-    "hedge": {
+    "second": {
       "exchange": "hyperliquid",
       "market": "perp",
-      "address": "0x这里替换为实际账户地址",
-      "usdc_to_usdt": 1.0
+      "address": "填写dh实际Hyperliquid账户或子账户的0x地址",
+      "usdc_to_usdt": 1.0,
+      "token_rates": {},
+      "symbol_map": {}
     }
   }
 }

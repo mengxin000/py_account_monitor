@@ -1,20 +1,30 @@
 {
   "account_id": "mfx",
-  "api_key": "paste-mfx-spot-api-key",
-  "secret_key": "paste-mfx-spot-secret-key",
-  "subaccount_email": "binance-sub-02@example.com",
   "output_dir": "runtime/mfx",
   "rest_interval_seconds": 5,
-  "include_balance": true,
-  "balance_interval_seconds": 60,
-  "spot": {
-    "mode": "spot"
-  },
-  "futures": {
-    "mode": "usdm"
-  },
-  "usdm": {
-    "api_key": "paste-mfx-futures-api-key",
-    "secret_key": "paste-mfx-futures-secret-key"
+  "legs": {
+    "first": {
+      "exchange": "hyperliquid",
+      "market": "perp",
+      "address": "填写mfx实际Hyperliquid账户或子账户的0x地址",
+      "usdc_to_usdt": 1.0,
+      "token_rates": {},
+      "symbol_map": {}
+    },
+    "second": {
+      "exchange": "okx",
+      "market": "perp",
+      "credentials": {
+        "api_key": "填写mfx的OKX_API_KEY",
+        "secret_key": "填写mfx的OKX_SECRET_KEY",
+        "passphrase": "填写mfx创建OKX_API时设置的口令"
+      },
+      "usd_to_usdt": 1.0,
+      "usdc_to_usdt": 1.0,
+      "token_rates": {},
+      "symbol_map": {},
+      "reconcile_interval_seconds": 60,
+      "simulated": false
+    }
   }
 }
