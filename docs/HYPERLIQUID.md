@@ -40,7 +40,12 @@
 ```
 
 地址必须是实际账户地址，不是API agent钱包地址。Hyperliquid只读监控不需要私钥。
-目前Hyperliquid账户模式支持`unifiedAccount`；如果实际模式不同，权益明确报错而非按零统计。
+Hyperliquid 通过 `userAbstraction` 自动识别 `unifiedAccount` 和 `default`，无需增加模式配置。
+`unifiedAccount` 保留共享现货余额加合约浮盈的原逻辑；`default` 将现货 total（含冻结部分，不另加 hold）与各 DEX 的 marginSummary.accountValue 分别估值后相加，不重复加浮盈。
+default 包括无持仓但有现金的 DEX，也保留负权益；各 DEX 每轮重新查询，任一查询/估值失败时不发布合计权益，不把缺失值当零。
+default 的 MMR 为各 DEX 全仓维持保证金 / crossMarginSummary.accountValue 的最大百分比；这是全仓风险指标，不表示逐仓仓位的清算距离。
+模式记录在 equity.json 的 hyperliquidState 与 baselineComponents 中；重启复用同模式基准，09:30 依旧换日。若模式变更则记录警告并重建基准，避免混算。
+其他模式（portfolioMargin、dexAbstraction、disabled）仍明确拒绝，不猜测资产口径。模式发现与产品元数据沿用每小时刷新；切换模式后建议重启监控立即重新发现。
 所有`legs`配置优先于旧的`spot`、`futures`、`hyperliquid`产品选择。
 `legs`支持最多两条腿，同一个监控账户最多一个Hyperliquid地址。
 代理字段可省略；也可继续由多账户配置提供共享代理。

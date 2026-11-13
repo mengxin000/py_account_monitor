@@ -27,6 +27,7 @@ class HyperliquidCollector:
         self.cloids = {}
         self.lock = asyncio.Lock()
         self.metadata = None
+        self.account_mode = "unifiedAccount"  # Replaced by discovery before live metadata is loaded.
         self.metadata_at = 0
         self.perp_states = None
         self.perp_states_at = 0
@@ -175,8 +176,8 @@ class HyperliquidCollector:
     async def equity_snapshot(self):
         if self.metadata is None or time.monotonic() - self.metadata_at > 3600:
             mode = await self.rest.info("userAbstraction", user=self.address)
-            if mode != "unifiedAccount":
-                raise ValueError(f"expected Hyperliquid unifiedAccount, got {mode}")
+            if mode not in {"unifiedAccount", "default"}:
+                raise ValueError(f"unsupported Hyperliquid account mode: {mode}")
             meta, dexs, spot_meta = await asyncio.gather(
                 self.rest.info("meta"), self.rest.info("perpDexs"), self.rest.info("spotMeta"))
             dex_meta = {"": meta}
@@ -184,13 +185,17 @@ class HyperliquidCollector:
                 if dex and dex.get("name"):
                     dex_meta[dex["name"]] = await self.rest.info("meta", dex=dex["name"])
             self.metadata = (dex_meta, spot_meta)
+            if mode != self.account_mode:
+                self.perp_states = None
+            self.account_mode = mode
             self.metadata_at = time.monotonic()
+            self.logger.info("Hyperliquid equity mode=%s", mode)
         dex_meta, spot_meta = self.metadata
         spot = await self.rest.info("spotClearinghouseState", user=self.address)
         conversion = rates(self.config)
         balances = spot.get("balances")
         if not isinstance(balances, list):
-            raise ValueError("Hyperliquid unified balances unavailable")
+            raise ValueError("Hyperliquid spot balances unavailable")
         tokens = {int(t["index"]): t["name"] for t in spot_meta["tokens"]}
         spot_contexts = None
 
@@ -223,6 +228,8 @@ class HyperliquidCollector:
                 continue
             coin = row["coin"]
             total += amount * await conversion_rate(coin)
+        if self.account_mode == "default":
+            return await self._default_equity(total, balances, dex_meta, tokens, conversion_rate, conversion)
         positions = []
         max_ratio = 0.0
         maintenance_by_token, isolated_by_token = {}, {}
@@ -279,6 +286,52 @@ class HyperliquidCollector:
         self.last_at, self.equity = datetime.now(), total
         return {"equity": total, "positions": positions, "balances": balances,
                 "mmr": max_ratio, "mode": "unifiedAccount", "usdcToUsdt": conversion["USDC"]}
+
+    async def _default_equity(self, total, balances, dex_meta, tokens, conversion_rate, conversion):
+        """Separate spot/DEX ledgers: accountValue ALREADY includes perp UPL.
+
+        Always take fresh REST samples here; the unified WS cache must not
+        supply stale or shared-ledger values to standard-account accounting.
+        """
+        semaphore = asyncio.Semaphore(4)
+        async def query(dex):
+            async with semaphore:
+                return dex, await self.rest.info("clearinghouseState", user=self.address, dex=dex)
+        states = dict(await asyncio.gather(*(query(dex) for dex in dex_meta)))
+        positions, components, max_ratio = [], {}, 0.0
+        for dex, meta in dex_meta.items():
+            state = states[dex]
+            try:
+                value = float(state["marginSummary"]["accountValue"])
+                cross = float(state["crossMarginSummary"]["accountValue"])
+                maintenance = float(state["crossMaintenanceMarginUsed"])
+                rows = state["assetPositions"]
+                if not isinstance(rows, list) or not all(math.isfinite(n) for n in (value, cross, maintenance)) or maintenance < 0:
+                    raise ValueError()
+            except (TypeError, KeyError, ValueError) as exc:
+                raise ValueError(f"invalid Hyperliquid default equity dex={dex}") from exc
+            # Cash with no positions is still equity. Negative equity is not zero.
+            if value != 0:
+                collateral = tokens.get(int(meta.get("collateralToken", 0)))
+                if collateral is None:
+                    raise ValueError(f"unknown Hyperliquid collateral token dex={dex}")
+                components[dex] = value * await conversion_rate(collateral)
+                total += components[dex]
+            else:
+                components[dex] = 0.0
+            if maintenance > 0:
+                max_ratio = max(max_ratio, maintenance / cross * 100 if cross > 0 else 100.0)
+            for row in rows:
+                p = row["position"]
+                if not all(math.isfinite(float(p.get(k, 0) or 0)) for k in ("szi", "unrealizedPnl", "marginUsed")):
+                    raise ValueError(f"Hyperliquid position non-finite dex={dex}")
+                positions.append({**p, "dex": dex})
+        if not math.isfinite(total):
+            raise ValueError("Hyperliquid equity non-finite")
+        self.last_at, self.equity = datetime.now(), total
+        return {"equity": total, "positions": positions, "balances": balances,
+                "perpEquities": components, "mmr": max_ratio, "mode": "default",
+                "usdcToUsdt": conversion["USDC"]}
 
     async def open_orders(self):
         # Read all deployed perpetual DEXs; Spot orders are excluded.

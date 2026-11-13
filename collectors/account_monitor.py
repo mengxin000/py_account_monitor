@@ -596,6 +596,13 @@ class BinanceAccountMonitor:
                           and (not self.okx or okx_value is not None))
         if required_ready and components:
             self._total_equity = sum(components)
+            hl_mode = hl_snapshot.get("mode") if hl_snapshot else None
+            if self._baseline_equity is not None and hl_mode:
+                previous_mode = (self._baseline_components or {}).get("hyperliquidMode", "unifiedAccount")
+                if hl_mode != previous_mode:
+                    LOGGER.warning("Hyperliquid equity mode changed account=%s old=%s new=%s; resetting baseline",
+                                   self.config.account_id, previous_mode, hl_mode)
+                    self._baseline_equity = None
             if self._baseline_equity is None:
                 self._baseline_equity = self._total_equity
                 self._baseline_at = datetime.now()
@@ -605,6 +612,8 @@ class BinanceAccountMonitor:
                                             "usdmTime": usdm_time.isoformat() if usdm_time else None}
                 if self.hyperliquid:
                     self._baseline_components["hyperliquid"] = hl_value
+                    if hl_snapshot and hl_snapshot.get("mode"):
+                        self._baseline_components["hyperliquidMode"] = hl_snapshot["mode"]
                 if self.okx:
                     self._baseline_components["okx"] = okx_value
                 baseline_account = futures_account if self.config.futures_mode == "usdm" else pm_account
