@@ -71,8 +71,9 @@ def event_identity(row):
 
 
 class AccountProjection:
-    def __init__(self, root):
+    def __init__(self, root, matching_rules=None):
         self.root = Path(root)
+        self.matching_rules = matching_rules
         self.journal = Journal(self.root / "trade_callbacks.jsonl")
         self.events = []
         self.seen = set()
@@ -86,19 +87,19 @@ class AccountProjection:
         self.aliases = load_underlying_alias()
 
     @staticmethod
-    def ingest(matchers, row, aliases=None):
+    def ingest(matchers, row, aliases=None, matching_rules=None):
         event = dict(callback_event(row))
         for key in ("exchange", "accountId", "accountScope"):
             if key in row: event[key] = row[key]
         order = LegacyMatcher.from_order_event(event)
-        matcher = matchers.setdefault(_exposure_key(order.symbol, aliases), LegacyMatcher())
+        matcher = matchers.setdefault(_exposure_key(order.symbol, aliases), LegacyMatcher(matching_rules=matching_rules))
         matcher.ingest(order)
         matcher.find_not_match_order(now_ms=_event_time(event))
 
     def rebuild(self, records):
         matchers = {}
         for _, _, row in sorted(records, key=lambda item: (item[0], item[1])):
-            self.ingest(matchers, row, self.aliases)
+            self.ingest(matchers, row, self.aliases, self.matching_rules)
         return matchers
 
     @staticmethod
@@ -107,7 +108,7 @@ class AccountProjection:
         for base, matcher in matchers.items():
             # Expiration / Exposure in a clone preserves event-time ordering of
             # the canonical state when late callbacks arrive.
-            clone = LegacyMatcher()
+            clone = LegacyMatcher(matching_rules=matcher.matching_rules)
             for name in ("match_orders", "buy_not_match_orders", "sell_not_match_orders", "no_save_orders"):
                 setattr(clone, name, copy.deepcopy(getattr(matcher, name)))
             clone.find_not_match_order(now_ms=now)
@@ -151,7 +152,7 @@ class AccountProjection:
             self.matchers = self.rebuild(self.events)
         else:
             for _, _, row in sorted(added, key=lambda item:(item[0],item[1])):
-                self.ingest(self.matchers,row,self.aliases)
+                self.ingest(self.matchers,row,self.aliases,self.matching_rules)
         if added: self.last_event = max(self.last_event, max(t for t,_,_ in added))
         audit_due = time.monotonic() - self.last_check >= 3600 or reset or not self.snapshot or aliases_changed
         if not added and not audit_due and now < self.next_expiry:
@@ -159,7 +160,7 @@ class AccountProjection:
         result = self.view(self.matchers, max(now,self.last_event))
         if audit_due:
             # Independently re-read the durable journal, not the in-memory list.
-            audit = AccountProjection(self.root)
+            audit = AccountProjection(self.root, self.matching_rules)
             checked, _ = audit.journal.read(limit=self.journal.offset)
             # Same byte cutoff as current projection.
             audit_records, audit_seen = [], set()

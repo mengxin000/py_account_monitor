@@ -68,11 +68,15 @@ def _generate_and_send_reports(monitors, email_path, base, day, service_config=N
         aliases = load_underlying_alias()
         for monitor in monitors:
             try:
+                okx = getattr(monitor, "okx", None)
+                if okx and okx.report_error:
+                    raise RuntimeError(f"OKX data reconciliation incomplete: {okx.report_error}")
                 day_dir = monitor.store.root / day
                 if not day_dir.exists():
                     continue
                 sources = read_trade_sources(day_dir)
-                replay_day(day_dir, aliases=aliases, trade_sources=sources)
+                replay_day(day_dir, aliases=aliases, trade_sources=sources,
+                           matching_rules=getattr(monitor.config, "matching_rules", None))
                 data = load_report_data(day_dir, monitor.config.account_id,
                                         aliases=aliases, trade_sources=sources)
                 data.funding_markets = configured_markets(monitor.config)
@@ -96,6 +100,15 @@ def _generate_and_send_reports(monitors, email_path, base, day, service_config=N
 
 
 async def _run_report_job(*args, **kwargs):
+    # OKX's canonical input is REST fills, not cumulative WS orders. Reconcile
+    # before freezing sources, including the independent 09:30 final report.
+    for monitor in args[0]:
+        okx = getattr(monitor, "okx", None)
+        if okx:
+            try:
+                await okx.reconcile()
+            except Exception:
+                LOGGER.exception("OKX pre-report reconciliation failed account=%s", monitor.config.account_id)
     # Cancellation must not release ownership while a worker still writes files.
     worker = asyncio.create_task(asyncio.to_thread(_generate_and_send_reports, *args, **kwargs))
     try:

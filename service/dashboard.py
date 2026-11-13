@@ -24,6 +24,9 @@ def number(value, integer=False):
 
 
 def leg_view(exchange, market, status, config):
+    if exchange == "okx":
+        return ("OKX " + MARKET_NAMES.get(market, market), "okx", status.get("okx_equity"),
+                status.get("okx_at"), status.get("okx_mmr"))
     if exchange == "hyperliquid":
         return ("Hyperliquid", "hyperliquid", status.get("hyperliquid_equity"),
                 status.get("hyperliquid_at"), status.get("hyperliquid_mmr"))
@@ -51,8 +54,9 @@ def render(monitors, report_state):
         lines.extend(["", f"[{status['account_id']}] " + "─" * 64])
         headers, values, seen = [], [], set()
         for name, scope, equity, at, mmr in legs:
-            shared = scope == "pm" and scope in seen
-            headers.append("Binance PM共用资金" if shared else "Binance PM统一权益" if scope == "pm" else name + "权益")
+            shared = scope in {"pm", "okx"} and scope in seen
+            headers.append(("OKX共用资金" if scope == "okx" else "Binance PM共用资金") if shared else
+                           "OKX统一权益" if scope == "okx" else "Binance PM统一权益" if scope == "pm" else name + "权益")
             values.append("与前列共用" if shared else number(equity))
             seen.add(scope)
         headers.extend(["合计权益", "实际损益"])

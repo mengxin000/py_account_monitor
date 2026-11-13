@@ -7,7 +7,7 @@ import math
 from dataclasses import dataclass, field
 from typing import Any, Callable, Mapping
 from .models import MatchOrder
-from .order_linking import is_matching_order, orders_linked
+from .order_linking import is_matching_order, orders_linked, validate_candidates, AmbiguousOrderLink, compile_rule_table
 
 
 def quoted_spread_from_client_id(client_id: str, market_type: str) -> float | None:
@@ -66,8 +66,11 @@ class LegacyMatcher:
         *,
         timeout_ms: int = 600_000,
         on_match: Callable[[MatchRecord], Any] | None = None,
+        matching_rules: dict | None = None,
     ) -> None:
         self.timeout_ms = timeout_ms
+        self.matching_rules = matching_rules
+        self.rule_table = compile_rule_table(matching_rules)
         self.match_orders: list[MatchOrder] = []
         self.no_save_orders: list[MatchOrder] = []
         self.buy_not_match_orders: list[MatchOrder] = []
@@ -81,6 +84,16 @@ class LegacyMatcher:
         self.on_match = on_match
         self._lock = threading.RLock()
         self._execution_ids = set()
+        self._association_error = None
+
+    def _check_association(self):
+        if self._association_error is not None:
+            raise self._association_error
+
+    def _linked(self, a, b):
+        if self.matching_rules is None:
+            return orders_linked(a, b)
+        return orders_linked(a, b, self.rule_table)
 
     @staticmethod
     def from_order_event(event: Mapping[str, Any]) -> MatchOrder:
@@ -104,7 +117,8 @@ class LegacyMatcher:
         on the terminal callback their accumulated fees are added exactly once.
         """
         with self._lock:
-            if current.exchange == "hyperliquid":
+            self._check_association()
+            if current.execution_id:
                 if current.identity in self._execution_ids:
                     return []
             if current.status == "PARTIALLY_FILLED":
@@ -137,7 +151,7 @@ class LegacyMatcher:
             # leaving only the last callback's commission on a residual.
             current.fee += accumulated
             result = self.process_completed(current, extra_fee=extra_fee)
-            if current.exchange == "hyperliquid":
+            if current.execution_id:
                 self._execution_ids.add(current.identity)
             return result
 
@@ -151,11 +165,19 @@ class LegacyMatcher:
         """
         output: list[MatchRecord] = []
         with self._lock:
+            self._check_association()
             if current.quantity > 1e-8 and (not math.isfinite(current.price) or current.price <= 0):
                 raise ValueError(
                     f"missing executed price: symbol={current.symbol} order_id={current.system_id} "
                     f"status={current.status} quantity={current.quantity}"
                 )
+            candidates = [order for order in self.match_orders
+                          if order.quantity > 1e-8 and self._linked(current, order)]
+            try:
+                validate_candidates(current, candidates, self.rule_table)
+            except AmbiguousOrderLink as exc:
+                self._association_error = exc
+                raise
             order_qty = current.quantity
             current_fee_remaining = current.fee + extra_fee
             flag = False
@@ -163,7 +185,7 @@ class LegacyMatcher:
             index = 0
             while index < len(self.match_orders):
                 queued_order = self.match_orders[index]
-                if not orders_linked(current, queued_order):
+                if not self._linked(current, queued_order):
                     index += 1
                     continue
                 min_qty = min(order_qty, queued_order.quantity)
@@ -264,6 +286,7 @@ class LegacyMatcher:
         now = now_ms if now_ms is not None else int(time.time() * 1000)
         moved: list[MatchOrder] = []
         with self._lock:
+            self._check_association()
             index = 0
             while index < len(self.match_orders):
                 order = self.match_orders[index]
@@ -282,6 +305,7 @@ class LegacyMatcher:
     def handle_not_match_order(self) -> list[ExposureMatch]:
         result: list[ExposureMatch] = []
         with self._lock:
+            self._check_association()
             if not self.buy_not_match_orders or not self.sell_not_match_orders:
                 return result
             exposure_symbol = self.buy_not_match_orders[0].symbol or self.sell_not_match_orders[0].symbol

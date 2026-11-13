@@ -31,8 +31,9 @@ def trading_day():
 
 
 class LiveData:
-    def __init__(self,accounts,root,bridge,proxy=None):
+    def __init__(self,accounts,root,bridge,proxy=None,matching_rules=None):
         self.accounts = accounts
+        self.matching_rules = matching_rules or {}
         self.root = Path(root)
         self.bridge = bridge
         self.depth = DepthService(proxy)
@@ -48,7 +49,7 @@ class LiveData:
     def refresh(self):
         day = trading_day()
         if self.day != day:
-            self.projections = {a:AccountProjection(Path(path)/day) for a,path in self.accounts.items()}
+            self.projections = {a:AccountProjection(Path(path)/day,self.matching_rules.get(a)) for a,path in self.accounts.items()}
             self.journals = {a:Journal(Path(path)/day/"all_callbacks.jsonl") for a,path in self.accounts.items()}
             self.day = day
         for account,projection in self.projections.items():

@@ -11,7 +11,7 @@ def resolve_legs(values):
     if not isinstance(legs, dict) or not 1 <= len(legs) <= 2:
         raise ValueError("legs must contain one or two named legs")
     result = dict(values)
-    result.update(spot={"mode": "none"}, futures={"mode": "none"}, usdm={}, hyperliquid={"enabled": False})
+    result.update(spot={"mode": "none"}, futures={"mode": "none"}, usdm={}, hyperliquid={"enabled": False}, okx={"enabled": False})
     used = set()
     pm_pair = None
     for name, leg in legs.items():
@@ -23,6 +23,21 @@ def resolve_legs(values):
                 raise ValueError("only one Hyperliquid account is supported per monitoring account")
             result["hyperliquid"] = {**leg, "enabled": True, "leg": name}
             used.add("hyperliquid")
+        elif exchange == "okx" and market in {"spot", "margin", "perp", "futures"}:
+            inst_type = {"spot": "SPOT", "margin": "MARGIN", "perp": "SWAP", "futures": "FUTURES"}[market]
+            settings = {**values.get("okx", {}), **leg.get("credentials", {}), **leg, "enabled": True}
+            for key in ("exchange", "market", "credentials", "inst_types"):
+                settings.pop(key, None)
+            if "okx" in used:
+                previous = {k: v for k, v in result["okx"].items() if k != "inst_types"}
+                if previous != settings:
+                    raise ValueError("two OKX legs must share identical account credentials and valuation settings")
+                if inst_type in result["okx"]["inst_types"]:
+                    raise ValueError("duplicate OKX market leg")
+                result["okx"]["inst_types"].append(inst_type)
+            else:
+                result["okx"] = {**settings, "inst_types": [inst_type]}
+                used.add("okx")
         elif exchange == "binance" and market in {"spot", "pm_margin", "usdm", "pm_um"}:
             kind = "spot" if market in {"spot", "pm_margin"} else "futures"
             if kind in used:

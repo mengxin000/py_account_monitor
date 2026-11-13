@@ -3,8 +3,10 @@ import re
 from dataclasses import asdict
 try:
     from ...core.models import MatchOrder
+    from ...core.order_linking import reference_sid_from_cloid
 except ImportError:
     from core.models import MatchOrder
+    from core.order_linking import reference_sid_from_cloid
 
 
 def symbol_for(coin, config):
@@ -50,7 +52,8 @@ def normalize_fill(fill, account_id, config, cloid=""):
         time_ms=stamp, fill_time=stamp, symbol=symbol, native_symbol=coin,
         market_type="futures", exchange="hyperliquid", account_id=account_id,
         account_scope="hyperliquid", execution_id=f"{stamp}:{fill['tid']}",
-        fee_currency=asset, leg=config.get("leg", "hedge"))
+        fee_currency=asset, leg=config.get("leg", "hedge"),
+        reference_sid=reference_sid_from_cloid(str(fill.get("cloid") or cloid or "")) or "")
     return asdict(order)
 
 

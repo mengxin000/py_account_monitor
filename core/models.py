@@ -24,6 +24,7 @@ class MatchOrder:
     native_symbol: str = ""
     fee_currency: str = "USDT"
     leg: str = ""
+    reference_sid: str = ""  # Explicit hedge target; never replaces own CID/SID.
 
     @property
     def identity(self):

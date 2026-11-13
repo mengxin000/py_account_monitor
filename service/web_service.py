@@ -10,7 +10,7 @@ from pathlib import Path
 LOGGER=logging.getLogger("binance_web_supervisor")
 
 
-def worker(accounts,root,config,bridge,stop,proxy):
+def worker(accounts,root,config,bridge,stop,proxy,matching_rules=None):
     from aiohttp import web
     try:
         from ..web.app import LiveData,make_app
@@ -23,7 +23,7 @@ def worker(accounts,root,config,bridge,stop,proxy):
     logging.getLogger().handlers=[handler]
     logging.getLogger().setLevel(logging.INFO)
     async def run():
-        live=LiveData(accounts,root,bridge,proxy)
+        live=LiveData(accounts,root,bridge,proxy,matching_rules)
         runner=web.AppRunner(make_app(live,config),access_log=None)
         await runner.setup()
         try:
@@ -59,7 +59,8 @@ async def _supervise(monitors,root,config,proxy):
     while True:
         bridge,stop=ctx.Queue(64),ctx.Event()
         accounts={m.config.account_id:str(m.store.root) for m in monitors}
-        process=ctx.Process(target=worker,args=(accounts,str(root),config,bridge,stop,proxy))
+        rules={m.config.account_id:getattr(m.config,"matching_rules",None) for m in monitors}
+        process=ctx.Process(target=worker,args=(accounts,str(root),config,bridge,stop,proxy,rules))
         process.start()
         def publish(row):
             try: bridge.put_nowait(row)

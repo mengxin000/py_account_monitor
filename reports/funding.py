@@ -1,8 +1,8 @@
 """Presentation-only funding breakdown; keep the existing P&L accounting."""
 from collections import Counter
 
-EXCHANGE_NAMES = {"binance": "Binance", "hyperliquid": "Hyperliquid"}
-MARKET_NAMES = {"spot": "现货", "pm_margin": "PM现货", "pm_um": "PM UM", "usdm": "USDM", "perp": "永续"}
+EXCHANGE_NAMES = {"binance": "Binance", "hyperliquid": "Hyperliquid", "okx": "OKX"}
+MARKET_NAMES = {"spot": "现货", "pm_margin": "PM现货", "pm_um": "PM UM", "usdm": "USDM", "perp": "永续", "margin": "杠杆现货", "futures": "交割合约"}
 
 
 def configured_markets(config):
@@ -15,12 +15,17 @@ def configured_markets(config):
             markets.append(("binance", mode))
     if getattr(config, "hyperliquid", {}).get("enabled", False):
         markets.append(("hyperliquid", "perp"))
+    if getattr(config, "okx", {}).get("enabled", False):
+        markets.extend(("okx", {"SPOT": "spot", "MARGIN": "margin", "SWAP": "perp", "FUTURES": "futures"}[t])
+                       for t in config.okx.get("inst_types", ["SPOT", "SWAP", "FUTURES"]))
     return markets
 
 
 def funding_source(row):
     exchange = str(row.get("exchange", "")).lower()
     scope = str(row.get("accountScope", "")).lower()
+    if exchange == "okx":
+        return ("okx", {"swap": "perp"}.get(scope, scope))
     if exchange == "hyperliquid" or scope == "hyperliquid" or str(row.get("source", "")).startswith("hyperliquid"):
         return ("hyperliquid", "perp")
     market = {"um": "pm_um", "usdm": "usdm", "pm_margin": "pm_margin", "spot": "spot"}.get(scope)

@@ -13,6 +13,7 @@ instances with different credentials and output directories.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import asyncio
 import json
 import logging
@@ -52,10 +53,15 @@ except ImportError:
 from .binance.normalize import source_metadata
 from .binance.equity import spot_equity
 from .hyperliquid.account import HyperliquidCollector
+from .okx.integrated import IntegratedOKXCollector, valuation_rates as okx_valuation_rates
 try:
     from ..config.legs import resolve_legs, validate_hyperliquid
+    from ..config.okx import build_okx_config
+    from ..core.order_linking import compile_rule_table
 except ImportError:
     from config.legs import resolve_legs, validate_hyperliquid
+    from config.okx import build_okx_config
+    from core.order_linking import compile_rule_table
 try:
     from ..connections.diagnostics import connection_error
 except ImportError:
@@ -85,6 +91,8 @@ class AccountMonitorConfig:
     hyperliquid: dict[str, Any] = field(default_factory=dict)
     # Public identities only, in configured order; never pass credentials to reports.
     report_markets: tuple[tuple[str, str], ...] = ()
+    okx: dict[str, Any] = field(default_factory=dict, repr=False)
+    matching_rules: dict | None = None
 
 
 def trading_day(now: datetime | None = None) -> str:
@@ -239,13 +247,15 @@ class BinanceAccountMonitor:
         if not math.isfinite(config.pm_usd_to_usdt) or config.pm_usd_to_usdt <= 0:
             raise ValueError("pm_usd_to_usdt must be finite and positive")
         self.config = config
+        compile_rule_table(config.matching_rules)
         if config.spot_mode not in {"spot", "pm_margin", "none"}:
             raise ValueError(f"unsupported spot.mode: {config.spot_mode}")
         if config.futures_mode not in {"pm_um", "usdm", "none"}:
             raise ValueError(f"unsupported futures.mode: {config.futures_mode}")
         validate_hyperliquid(config.hyperliquid)
         self.uses_hyperliquid = bool(config.hyperliquid.get("enabled", False))
-        if config.spot_mode == "none" and config.futures_mode == "none" and not self.uses_hyperliquid:
+        self.uses_okx = bool(config.okx.get("enabled", False))
+        if config.spot_mode == "none" and config.futures_mode == "none" and not self.uses_hyperliquid and not self.uses_okx:
             raise ValueError("at least one of spot.mode or futures.mode must be enabled")
         if config.futures_mode == "usdm" and config.usdm_credentials is None:
             raise ValueError("futures.mode=usdm requires usdm api_key and secret_key")
@@ -294,11 +304,22 @@ class BinanceAccountMonitor:
         ) if self.uses_hyperliquid else None
         self._hyperliquid_equity = None
         self._hyperliquid_mmr = None
+        self.okx = None
+        self._okx_equity = None
+        if self.uses_okx:
+            okx_config = build_okx_config({"account_id": config.account_id,
+                "output_dir": str(config.output_dir.resolve()), "rest_interval_seconds": config.rest_interval_seconds,
+                "proxy": config.proxy, "okx": config.okx},
+                Path(__file__).resolve().parents[1] / "config" / "account.local.json", isolated=False)
+            self.okx = IntegratedOKXCollector(okx_config, self.store, config.okx, self._hyperliquid_trade)
         self._baseline_components = None
         self._legacy_baseline = None
         self._equity_scope = f"spot={config.spot_mode};futures={config.futures_mode}:USDT:{config.pm_usd_to_usdt}"
         if self.hyperliquid:
             self._equity_scope += f";hyperliquid={config.hyperliquid['address'].lower()}:unified:{config.hyperliquid.get('usdc_to_usdt', 1.0)}:{json.dumps(config.hyperliquid.get('token_rates', {}), sort_keys=True)}"
+        if self.okx:
+            key_fingerprint = hashlib.sha256(self.okx.config.credentials.api_key.encode()).hexdigest()[:16]
+            self._equity_scope += f";okx={key_fingerprint}:unified:{json.dumps(self.okx.rates, sort_keys=True)}"
         self._baseline_equity: float | None = None
         self._baseline_at: datetime | None = None
         self._baseline_day: str | None = None
@@ -445,6 +466,15 @@ class BinanceAccountMonitor:
         hl_snapshot = None
         hl_value = 0.0 if not self.hyperliquid else None
         hl_time = None
+        okx_value, okx_time, okx_snapshot = (0.0 if not self.okx else None), None, None
+        if self.okx:
+            try:
+                okx_snapshot = await self.okx.equity_snapshot()
+                okx_value, okx_time = okx_snapshot["equity"], self.okx.last_at
+                self._rest_errors.pop("okx", None)
+            except Exception as exc:
+                self._rest_errors["okx"] = f"{type(exc).__name__}: {exc}"
+            self._okx_equity = okx_value
         if self.hyperliquid:
             try:
                 hl_snapshot = await self.hyperliquid.equity_snapshot()
@@ -534,6 +564,8 @@ class BinanceAccountMonitor:
         component_times = [at for at, value in ((pm_time, float(pm_account["actualEquity"]) * self.config.pm_usd_to_usdt if pm_account else None), (spot_time, spot_value), (usdm_time, usdm_value)) if at and value is not None]
         if hl_time:
             component_times.append(hl_time)
+        if okx_time:
+            component_times.append(okx_time)
         if component_times and (max(component_times) - min(component_times)).total_seconds() > max(30, self.config.rest_interval_seconds * 3):
             if spot_time:
                 self._rest_errors["spot"] = "equity sample time skew too large"
@@ -544,6 +576,9 @@ class BinanceAccountMonitor:
             if hl_time:
                 self._rest_errors["hyperliquid"] = "equity sample time skew too large"
                 hl_value = None
+            if okx_time:
+                self._rest_errors["okx"] = "equity sample time skew too large"
+                okx_value = None
         if trading_day() != day:
             return  # Never mix samples spanning the 09:30 boundary.
         if self._baseline_day != day:
@@ -553,11 +588,12 @@ class BinanceAccountMonitor:
             self._baseline_components = None
             self._legacy_baseline = None
         pm = float(pm_account["actualEquity"]) * self.config.pm_usd_to_usdt if pm_account else (0.0 if not self.uses_pm else None)
-        components = [value for value in (pm, spot_value, usdm_value, hl_value) if value is not None]
+        components = [value for value in (pm, spot_value, usdm_value, hl_value, okx_value) if value is not None]
         required_ready = ((not self.uses_pm or pm is not None)
                           and (self.config.spot_mode != "spot" or spot_value is not None)
                           and (self.config.futures_mode != "usdm" or usdm_value is not None)
-                          and (not self.hyperliquid or hl_value is not None))
+                          and (not self.hyperliquid or hl_value is not None)
+                          and (not self.okx or okx_value is not None))
         if required_ready and components:
             self._total_equity = sum(components)
             if self._baseline_equity is None:
@@ -569,10 +605,12 @@ class BinanceAccountMonitor:
                                             "usdmTime": usdm_time.isoformat() if usdm_time else None}
                 if self.hyperliquid:
                     self._baseline_components["hyperliquid"] = hl_value
+                if self.okx:
+                    self._baseline_components["okx"] = okx_value
                 baseline_account = futures_account if self.config.futures_mode == "usdm" else pm_account
                 self._baseline_positions = baseline_account.get("positions", []) if baseline_account else []
                 LOGGER.info("combined equity baseline initialized account=%s day=%s time=%s", self.config.account_id, day, self._baseline_at)
-            if self.hyperliquid and hl_time:
+            if component_times:
                 self._last_account_at = max(component_times)
         state = {
             "schemaVersion": 2, "equityScope": self._equity_scope,
@@ -595,6 +633,9 @@ class BinanceAccountMonitor:
             "hyperliquidEquity": hl_value if self.hyperliquid else None,
             "hyperliquidTime": hl_time.isoformat() if hl_time else None,
             "hyperliquidState": hl_snapshot,
+            "okxEquity": okx_value if self.okx else None,
+            "okxTime": okx_time.isoformat() if okx_time else None,
+            "okxState": okx_snapshot,
             "spotAssets": assets, "errors": dict(self._rest_errors),
             "baselinePositions": self._baseline_positions,
             "latestPositions": ((futures_account if self.config.futures_mode == "usdm" else pm_account) or {}).get("positions", []),
@@ -683,6 +724,8 @@ class BinanceAccountMonitor:
         rest_task = asyncio.create_task(self._rest_loop())
         funding_task = asyncio.create_task(self._funding_loop())
         tasks = [rest_task, funding_task]
+        if self.okx:
+            tasks.append(asyncio.create_task(self.okx.run(self.stop_event)))
         if self.hyperliquid:
             tasks.append(asyncio.create_task(self.hyperliquid.stream.run(self.stop_event)))
             tasks.append(asyncio.create_task(self.hyperliquid.funding_loop(self.stop_event)))
@@ -706,6 +749,8 @@ class BinanceAccountMonitor:
                 await self.usdm_rest.close()
             if self.hyperliquid:
                 await self.hyperliquid.rest.close()
+            if self.okx:
+                await self.okx.rest.close()
 
     async def stop(self) -> None:
         self.stop_event.set()
@@ -729,6 +774,7 @@ class BinanceAccountMonitor:
                 "usdm": ("CONNECTED" if self.usdm_stream.connected else "CONNECTING") if self.usdm_stream else "DISABLED",
                 "spot": ("CONNECTED" if self.spot_stream.connected else "CONNECTING") if self.spot_stream else "DISABLED",
                 "hyperliquid": ("CONNECTED" if self.hyperliquid.stream.connected else "CONNECTING") if self.hyperliquid else "DISABLED",
+                "okx": ("CONNECTED" if self.okx.stream.connected else "CONNECTING") if self.okx else "DISABLED",
             },
             "account_id": self.config.account_id,
             "pm_equity": self._pm_equity,
@@ -737,10 +783,14 @@ class BinanceAccountMonitor:
             "hyperliquid_equity": self._hyperliquid_equity,
             "hyperliquid_at": self.hyperliquid.last_at if self.hyperliquid else None,
             "hyperliquid_mmr": self._hyperliquid_mmr,
+            "okx_equity": self._okx_equity,
+            "okx_at": self.okx.last_at if self.okx else None,
+            "okx_mmr": self.okx.mmr if self.okx else None,
             "total_equity": self._total_equity if fresh else None,
             "actual_profit": self._total_equity - self._baseline_equity if fresh and self._total_equity is not None and self._baseline_equity is not None else None,
             "spot_at": self._spot_at,
-            "rest_errors": dict(self._rest_errors),
+            "rest_errors": {**self._rest_errors, **({"okx_reconcile": self.okx.report_error}
+                            if self.okx and self.okx.report_error else {})},
             "stream_errors": {k:v for k,v in self._stream_errors.items()
                               if not ((k == "pm_stream" and self.user_stream and self.user_stream.connected)
                                       or (k == "usdm_stream" and self.usdm_stream and self.usdm_stream.connected)
@@ -780,6 +830,10 @@ def _credential_pair(
 def load_config(path: Path) -> AccountMonitorConfig:
     raw_values = json.loads(path.read_text(encoding="utf-8"))
     values = resolve_legs(raw_values)
+    compile_rule_table(values.get("matching_rules"))
+    if values.get("okx", {}).get("enabled", False):
+        build_okx_config(values, path, isolated=False)  # Fail before starting any collectors.
+        okx_valuation_rates(values["okx"])
     credentials_file = values.get("credentials_file")
     credential_values: dict[str, Any] = {}
     if credentials_file:
@@ -863,6 +917,9 @@ def load_config(path: Path) -> AccountMonitorConfig:
         }
         order = dict.fromkeys([*raw_values, *selections])
         report_markets = tuple(selections[key] for key in order if selections.get(key))
+        if values.get("okx", {}).get("enabled", False):
+            report_markets += tuple(("okx", {"SPOT": "spot", "MARGIN": "margin", "SWAP": "perp", "FUTURES": "futures"}[t])
+                                    for t in values["okx"].get("inst_types", ["SPOT", "SWAP", "FUTURES"]))
     return AccountMonitorConfig(
         account_id=account_id,
         credentials=credentials,
@@ -874,6 +931,8 @@ def load_config(path: Path) -> AccountMonitorConfig:
         pm_usd_to_usdt=float(values.get("pm_usd_to_usdt", 1.0)),
         hyperliquid=dict(values.get("hyperliquid", {})),
         report_markets=report_markets,
+        okx=dict(values.get("okx", {})),
+        matching_rules=values.get("matching_rules"),
         output_dir=output_dir,
         rest_interval_seconds=float(values.get("rest_interval_seconds", 5.0)),
         include_balance=bool(values.get("include_balance", True)),

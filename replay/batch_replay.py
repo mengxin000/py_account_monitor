@@ -97,7 +97,7 @@ def read_trade_sources(day_dir: Path) -> dict[str, list]:
 
 
 def replay_day(day_dir: Path, *, aliases: dict[str, str] | None = None,
-               trade_sources: dict[str, list] | None = None) -> dict[str, Any]:
+               trade_sources: dict[str, list] | None = None, matching_rules=None) -> dict[str, Any]:
     aliases = load_underlying_alias() if aliases is None else dict(aliases)
     events: list[tuple[int, str, int, int, dict[str, Any]]] = []
     sources = read_trade_sources(day_dir) if trade_sources is None else trade_sources
@@ -127,7 +127,7 @@ def replay_day(day_dir: Path, *, aliases: dict[str, str] | None = None,
     for event_time, _, _, _, event in events:
         probe = LegacyMatcher()
         order = probe.from_order_event(event)
-        matcher = matchers.setdefault(_exposure_key(order.symbol, aliases), LegacyMatcher())
+        matcher = matchers.setdefault(_exposure_key(order.symbol, aliases), LegacyMatcher(matching_rules=matching_rules))
         matcher.ingest(order)
         matcher.find_not_match_order(now_ms=event_time)
 
@@ -199,8 +199,10 @@ def replay_day(day_dir: Path, *, aliases: dict[str, str] | None = None,
 def main() -> None:
     parser = argparse.ArgumentParser(description="Replay one day's Binance fill JSONL")
     parser.add_argument("--day-dir", type=Path, required=True, help="runtime/<account>/YYYYMMDD")
+    parser.add_argument("--account-config", type=Path, help="account local JSON containing matching_rules")
     args = parser.parse_args()
-    result = replay_day(args.day_dir.resolve())
+    rules = json.loads(args.account_config.read_text(encoding="utf-8-sig")).get("matching_rules") if args.account_config else None
+    result = replay_day(args.day_dir.resolve(), matching_rules=rules)
     print(json.dumps(result, ensure_ascii=False, indent=2))
 
 

@@ -255,6 +255,11 @@ uv run binance-monitor
 `log/YYYYMMDDrun.txt`；终端只显示每秒刷新的状态面板和错误摘要。
 
 ## 核心逻辑
+
+标准订单与交易所组合规则表见 [docs/ORDER_LINKING.md](docs/ORDER_LINKING.md)。保留现有收益公式，关联歧义会停止本轮回放，避免误入 Exposure。
+
+OKX 已接入主服务的账户调度、逐笔成交标准化、配对、权益基准和资金费报表；原始独立采集入口仍可用于排查。配置和边界见 [docs/OKX.md](docs/OKX.md)。未扩展 OKX 网页盘口。
+
 配对规则位于`core/legacy_matching.py`，撮合回放位于`replay/batch_replay.py`
 
 报告和excel位于 `output/<account_id>/YYYYMMDD/`。
