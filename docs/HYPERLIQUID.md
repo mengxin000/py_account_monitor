@@ -111,8 +111,10 @@ runtime/dh/YYYYMMDD/
 Hyperliquid记录增加`exchange=hyperliquid`、`accountScope=hyperliquid`、`eventId`和`normalizedOrder`。
 `data`保留原始fill或订单更新，`normalizedOrder`供回放/实时计算使用。
 Hyperliquid数据按交易所事件时间归属09:30交易日，接收时间另存为微秒`receivedTimeUs`。
-重连后重新订阅，并查询当前交易日的历史成交与资金费用，和落盘记录去重。
-历史接口本身有最多可查成交条数等限制，不能承诺恢复任意长时间停机前的数据；分页无法继续时明确报错。
+成交采用仅实时采集：启动、重连及每小时任务不再查询历史成交；`userFills` 中 `isSnapshot=true` 的整包忽略，不写入成交日志、不进入配对、也不登记去重 ID。
+重连后的快照同样忽略，因此断线期间漏收的成交不会自动恢复。缺少 cloid 的实时成交仍可通过 orderStatus 查询该订单身份，这不是历史成交回填。
+资金费不受此限制：启动、重连及每小时仍从当前交易日09:30补查 userFunding，并与推送去重；userFundings 快照继续处理。
+已写入的历史成交 JSONL 不自动删除或重新过滤；本次策略只影响更新后新收到的数据。OKX 的历史成交核对逻辑不变。
 未开启Hyperliquid的账户不会连接其REST或WebSocket。
 
 Hyperliquid资金费用通过`userFundings`推送保存，同时在启动/重连和每小时05秒进行REST核对。

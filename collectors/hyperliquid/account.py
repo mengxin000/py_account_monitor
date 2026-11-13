@@ -71,6 +71,10 @@ class HyperliquidCollector:
                 "receivedTime": datetime.now().isoformat(timespec="microseconds"), "data": data}
 
     async def fill(self, fill, received_us=None, *, source="hyperliquid_stream", is_snapshot=False):
+        # Live-only trade collection. Do not acknowledge snapshot IDs: a later
+        # live callback for that fill must still be eligible for persistence.
+        if is_snapshot:
+            return
         # Spot fills are not part of this perpetual leg.
         if str(fill["coin"]).startswith("@") or "/" in str(fill["coin"]):
             return
@@ -129,6 +133,9 @@ class HyperliquidCollector:
             self.perp_states = dict(data["clearinghouseStates"])
             self.perp_states_at = time.monotonic()
         elif channel == "userFills":
+            if data.get("isSnapshot", False):
+                self.logger.info("Hyperliquid fill snapshot ignored count=%d", len(data.get("fills", [])))
+                return
             for fill in data.get("fills", []):
                 await self.fill(fill, received_us, is_snapshot=bool(data.get("isSnapshot", False)))
         elif channel == "userFundings":
@@ -152,26 +159,18 @@ class HyperliquidCollector:
                     self.on_market({**row["orderView"], "e": "HYPERLIQUID_ORDER", "_accountScope": "hyperliquid"})
 
     async def reconcile(self):
-        # Populate cloid in one request before falling back to per-order lookup.
-        # userFills itself does not guarantee a cloid field.
-        historical = await self.rest.info("historicalOrders", user=self.address)
-        if not isinstance(historical, list):
-            raise ValueError("invalid Hyperliquid historicalOrders response")
-        for item in historical:
-            order = item["order"]
-            self.cloids[str(order["oid"])] = order.get("cloid") or ""
+        # Keep startup/reconnect/hourly FUNDING reconciliation, but never
+        # import pre-start or disconnected-period trade history on this leg.
+        # Live fills still resolve missing cloid via orderUpdates/orderStatus.
         now = datetime.now()
         start = now.replace(hour=9, minute=30, second=0, microsecond=0)
         if now < start:
             start -= timedelta(days=1)
         begin, end = int(start.timestamp() * 1000), int(now.timestamp() * 1000)
-        async for rows in self.rest.history("userFillsByTime", self.address, begin, end):
-            for row in sorted(rows, key=lambda x: (x["time"], x["tid"])):
-                await self.fill(row, source="hyperliquid_rest", is_snapshot=True)
         async for rows in self.rest.history("userFunding", self.address, begin, end):
             for row in rows:
                 await self.funding(row, source="hyperliquid_rest")
-        self.logger.info("Hyperliquid fills/funding reconciled from trading-day 09:30")
+        self.logger.info("Hyperliquid funding reconciled from trading-day 09:30; trade backfill disabled")
 
     async def equity_snapshot(self):
         if self.metadata is None or time.monotonic() - self.metadata_at > 3600:
