@@ -267,7 +267,9 @@ class HyperliquidCollector:
             isolated = 0.0
             for row in active_positions:
                 p = row["position"]
-                total += float(p["unrealizedPnl"]) * collateral_rate
+                # In unifiedAccount, Hyperliquid exposes the shared trading
+                # balance in spotClearinghouseState. Do not add the perps UPL
+                # again: it is already reflected in this unified total.
                 if p.get("leverage", {}).get("type") == "isolated":
                     isolated += float(p["marginUsed"])
                 positions.append({**p, "dex": dex})

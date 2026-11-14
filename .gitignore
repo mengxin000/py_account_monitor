@@ -16,4 +16,5 @@ runtime/
 *.iml
 probe_spot_key.py
 tests
-cli
+cli/*
+!cli/check_account_assets.py
