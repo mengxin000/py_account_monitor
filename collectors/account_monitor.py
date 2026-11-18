@@ -55,6 +55,10 @@ from .binance.equity import spot_equity
 from .hyperliquid.account import HyperliquidCollector
 from .okx.integrated import IntegratedOKXCollector, valuation_rates as okx_valuation_rates
 try:
+    from ..connections.bybit import BybitCredentials, BybitPrivateStream, BybitRestClient
+except ImportError:
+    from connections.bybit import BybitCredentials, BybitPrivateStream, BybitRestClient
+try:
     from ..config.legs import resolve_legs, validate_hyperliquid
     from ..config.okx import build_okx_config
     from ..core.order_linking import compile_rule_table
@@ -92,6 +96,7 @@ class AccountMonitorConfig:
     # Public identities only, in configured order; never pass credentials to reports.
     report_markets: tuple[tuple[str, str], ...] = ()
     okx: dict[str, Any] = field(default_factory=dict, repr=False)
+    bybit: dict[str, Any] = field(default_factory=dict, repr=False)
     matching_rules: dict | None = None
 
 
@@ -312,6 +317,16 @@ class BinanceAccountMonitor:
                 "proxy": config.proxy, "okx": config.okx},
                 Path(__file__).resolve().parents[1] / "config" / "account.local.json", isolated=False)
             self.okx = IntegratedOKXCollector(okx_config, self.store, config.okx, self._hyperliquid_trade)
+        self.bybit_rest = None
+        self.bybit_stream = None
+        if config.bybit.get("enabled", False):
+            bybit_credentials = BybitCredentials(config.bybit["api_key"], config.bybit["secret_key"])
+            self.bybit_rest = BybitRestClient(bybit_credentials,
+                base_url=config.bybit.get("rest_base_url", "https://api.bybit.com"), proxy=config.proxy)
+            self.bybit_stream = BybitPrivateStream(bybit_credentials, self._on_bybit_packet,
+                categories=config.bybit.get("categories", ["spot", "linear"]),
+                url=config.bybit.get("ws_url", "wss://stream.bybit.com/v5/private"), proxy=config.proxy,
+                logger=logging.getLogger(f"binance_account_monitor.{config.account_id}.bybit"))
         self._baseline_components = None
         self._legacy_baseline = None
         self._equity_scope = f"spot={config.spot_mode};futures={config.futures_mode}:USDT:{config.pm_usd_to_usdt}"
@@ -383,6 +398,16 @@ class BinanceAccountMonitor:
 
     async def _on_spot_event(self, event: dict[str, Any]) -> None:
         await self._on_user_event(event, source="spot_stream")
+
+    async def _on_bybit_packet(self, packet: dict[str, Any], received_us: int) -> None:
+        """Persist Bybit private packets verbatim; intentionally no normalization/matching."""
+        self.store.append("bybit_callbacks.jsonl", {
+            "exchange": "bybit", "source": "bybit_private_stream",
+            "accountScope": "bybit", "recordType": "bybit_callback",
+            "accountId": self.config.account_id,
+            "receivedTime": datetime.fromtimestamp(received_us / 1_000_000).isoformat(timespec="microseconds"),
+            "topic": packet.get("topic"), "data": packet,
+        })
 
     async def _on_usdm_event(self, event: dict[str, Any]) -> None:
         await self._on_user_event(event, source="usdm_stream")
@@ -735,6 +760,8 @@ class BinanceAccountMonitor:
         tasks = [rest_task, funding_task]
         if self.okx:
             tasks.append(asyncio.create_task(self.okx.run(self.stop_event)))
+        if self.bybit_stream:
+            tasks.append(asyncio.create_task(self.bybit_stream.run(self.stop_event)))
         if self.hyperliquid:
             tasks.append(asyncio.create_task(self.hyperliquid.stream.run(self.stop_event)))
             tasks.append(asyncio.create_task(self.hyperliquid.funding_loop(self.stop_event)))
@@ -760,6 +787,8 @@ class BinanceAccountMonitor:
                 await self.hyperliquid.rest.close()
             if self.okx:
                 await self.okx.rest.close()
+            if self.bybit_rest:
+                await self.bybit_rest.close()
 
     async def stop(self) -> None:
         self.stop_event.set()
@@ -784,6 +813,7 @@ class BinanceAccountMonitor:
                 "spot": ("CONNECTED" if self.spot_stream.connected else "CONNECTING") if self.spot_stream else "DISABLED",
                 "hyperliquid": ("CONNECTED" if self.hyperliquid.stream.connected else "CONNECTING") if self.hyperliquid else "DISABLED",
                 "okx": ("CONNECTED" if self.okx.stream.connected else "CONNECTING") if self.okx else "DISABLED",
+                "bybit": self.bybit_stream.state if self.bybit_stream else "DISABLED",
             },
             "account_id": self.config.account_id,
             "pm_equity": self._pm_equity,
@@ -804,7 +834,8 @@ class BinanceAccountMonitor:
                               if not ((k == "pm_stream" and self.user_stream and self.user_stream.connected)
                                       or (k == "usdm_stream" and self.usdm_stream and self.usdm_stream.connected)
                                       or (k == "spot_stream" and self.spot_stream and self.spot_stream.connected)
-                                      or (k == "hyperliquid_stream" and self.hyperliquid and self.hyperliquid.stream.connected))},
+                                      or (k == "hyperliquid_stream" and self.hyperliquid and self.hyperliquid.stream.connected)
+                                      or (k == "bybit_stream" and self.bybit_stream and self.bybit_stream.connected))},
             "account_equity": value("accountEquity"),
             "actual_equity": (float(account["actualEquity"]) * self.config.pm_usd_to_usdt
                               if account.get("actualEquity") is not None else
@@ -842,6 +873,15 @@ def load_config(path: Path) -> AccountMonitorConfig:
     compile_rule_table(values.get("matching_rules"))
     if values.get("okx", {}).get("enabled", False):
         build_okx_config(values, path, isolated=False)  # Fail before starting any collectors.
+    bybit_values = dict(values.get("bybit", {}))
+    if bybit_values.get("enabled", False):
+        api_key, secret_key, _ = _credential_pair(sources=[bybit_values])
+        if not api_key or not secret_key:
+            raise SystemExit("bybit.enabled requires bybit.api_key and bybit.secret_key")
+        categories = bybit_values.get("categories", ["spot", "linear"])
+        if not isinstance(categories, list) or not categories or any(item not in {"spot", "linear"} for item in categories):
+            raise ValueError("bybit.categories must be a non-empty list containing spot and/or linear")
+        bybit_values.update(api_key=api_key, secret_key=secret_key, categories=categories)
         okx_valuation_rates(values["okx"])
     credentials_file = values.get("credentials_file")
     credential_values: dict[str, Any] = {}
@@ -917,7 +957,8 @@ def load_config(path: Path) -> AccountMonitorConfig:
         # config/ at the project root.
         output_dir = path.parent.parent / output_dir
     if "legs" in raw_values:
-        report_markets = tuple((leg["exchange"], leg["market"]) for leg in raw_values["legs"].values())
+        report_markets = tuple((leg["exchange"], leg["market"]) for leg in raw_values["legs"].values()
+                               if leg.get("exchange") != "bybit")
     else:
         selections = {
             "spot": ("binance", spot_mode) if spot_mode != "none" else None,
@@ -941,6 +982,7 @@ def load_config(path: Path) -> AccountMonitorConfig:
         hyperliquid=dict(values.get("hyperliquid", {})),
         report_markets=report_markets,
         okx=dict(values.get("okx", {})),
+        bybit=bybit_values,
         matching_rules=values.get("matching_rules"),
         output_dir=output_dir,
         rest_interval_seconds=float(values.get("rest_interval_seconds", 5.0)),

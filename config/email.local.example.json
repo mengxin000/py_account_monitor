@@ -1,10 +1,25 @@
 {
-  "address": "smtp://smtp.example.com:587",
-  "user": "monitor@example.com",
-  "pass": "covmvwoxfusobfig",
-  "sender": "monitor@example.com",
-  "recipients": ["recipients@example.com"],
+  "mailboxes": [
+    {
+      "id": "primary",
+      "address": "smtp://smtp.example.com:587",
+      "user": "monitor@example.com",
+      "pass": "replace-with-app-password",
+      "sender": "monitor@example.com",
+      "use_starttls": true,
+      "daily_recipient_limit": 288
+    },
+    {
+      "id": "reserve-1",
+      "address": "smtp://smtp2.example.com:587",
+      "user": "monitor2@example.com",
+      "pass": "replace-with-app-password",
+      "sender": "monitor2@example.com",
+      "use_starttls": true,
+      "daily_recipient_limit": 288
+    }
+  ],
+  "recipients": ["trader1@example.com", "trader2@example.com"],
   "cc": [],
-  "use_starttls": true,
   "subject_prefix": "Binance账户监控"
 }

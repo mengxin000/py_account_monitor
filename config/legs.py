@@ -1,4 +1,4 @@
-"""Resolve account-local Binance, Hyperliquid and OKX leg configuration."""
+"""Resolve account-local Binance, Hyperliquid, OKX and Bybit leg configuration."""
 import math
 import re
 from .credentials import credential_pair
@@ -11,7 +11,7 @@ def resolve_legs(values):
     if not isinstance(legs, dict) or not 1 <= len(legs) <= 2:
         raise ValueError("legs must contain one or two named legs")
     result = dict(values)
-    result.update(spot={"mode": "none"}, futures={"mode": "none"}, usdm={}, hyperliquid={"enabled": False}, okx={"enabled": False})
+    result.update(spot={"mode": "none"}, futures={"mode": "none"}, usdm={}, hyperliquid={"enabled": False}, okx={"enabled": False}, bybit={"enabled": False, "categories": []})
     used = set()
     pm_pair = None
     for name, leg in legs.items():
@@ -38,6 +38,23 @@ def resolve_legs(values):
             else:
                 result["okx"] = {**settings, "inst_types": [inst_type]}
                 used.add("okx")
+        elif exchange == "bybit" and market in {"spot", "linear"}:
+            credentials = leg.get("credentials", {})
+            settings = {**values.get("bybit", {}), **credentials, **leg}
+            for key in ("exchange", "market", "credentials"):
+                settings.pop(key, None)
+            if "bybit" in used:
+                previous = {k: v for k, v in result["bybit"].items() if k not in {"categories", "enabled"}}
+                comparable = {k: v for k, v in settings.items() if k not in {"categories", "enabled"}}
+                if previous != comparable:
+                    raise ValueError("two Bybit legs must share identical account credentials")
+                category = market
+                if category in result["bybit"]["categories"]:
+                    raise ValueError("duplicate Bybit market leg")
+                result["bybit"]["categories"].append(category)
+            else:
+                result["bybit"] = {**settings, "enabled": True, "categories": [market]}
+                used.add("bybit")
         elif exchange == "binance" and market in {"spot", "pm_margin", "usdm", "pm_um"}:
             kind = "spot" if market in {"spot", "pm_margin"} else "futures"
             if kind in used:

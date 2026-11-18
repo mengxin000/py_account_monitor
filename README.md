@@ -233,23 +233,22 @@ first_report_delay_seconds是程序启动后第一封邮件发送时间，report
 
 开启后，每次发送前复制最新文件到 `output/spot_futures.json` 并附加发送。关闭或未配置 `spot_futures_enable` 时不复制、不附加。相对路径以项目目录为基准；配置修改后重启生效。复制失败时写入运行日志，照常发送原有报告，不附加上一次的 JSON。
 
-在email.local.json中配置邮箱发送邮件
-需要将`address`，`user`，`pass`改为你自己的，用于smtp邮件验证，
-`sender` 为邮件发送方，`recipients`为邮件接收方，`cc`为抄送
+`email.local.json` 使用 `mailboxes` 配置有序邮箱池。每个邮箱需要唯一 `id`，以及自己的 SMTP 地址、凭据和 `daily_recipient_limit`；达到额度后程序自动使用下一个有额度的邮箱。`recipients` 和 `cc` 是所有发件邮箱共用的收件列表。旧版单邮箱字段仍兼容。
 
-以163邮箱smtp发送为例
+例如以两个 163 邮箱发送：
 ```json
 {
-  "address": "smtp://smtp.163.com:587",
-  "user": "monitor@163.com",
-  "pass": "your-smpt-pass",
-  "sender": "monitor@163.com",
-  "recipients": ["recipients@example.com"],
+  "mailboxes": [
+    {"id":"primary","address":"smtp://smtp.163.com:587","user":"monitor@163.com","pass":"app-password","sender":"monitor@163.com","use_starttls":true,"daily_recipient_limit":288},
+    {"id":"reserve-1","address":"smtp://smtp.163.com:587","user":"monitor2@163.com","pass":"app-password","sender":"monitor2@163.com","use_starttls":true,"daily_recipient_limit":288}
+  ],
+  "recipients": ["trader1@example.com", "trader2@example.com"],
   "cc": [],
-  "use_starttls": true,
   "subject_prefix": "数据报表"
 }
 ```
+
+每次报告任务在发送前按 To+CC 收件人数预留额度；一次报告任务只记一次，即使内部 SMTP 连接重试也不重复扣数，成功失败均保留计数。用量写入 `runtime/email_pool_usage.jsonl`，程序同一天重启后继续累计；新自然日自动重新计数。所有邮箱都无法容纳本次收件人数时，本次发送失败并记入运行日志，不会超额发送。
 
 ## 启动
 

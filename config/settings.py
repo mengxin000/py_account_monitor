@@ -9,15 +9,22 @@ from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
-class EmailSettings:
+class EmailMailbox:
+    mailbox_id: str
     smtp_host: str
     smtp_port: int
     username: str
     password: str
     sender: str
+    use_starttls: bool = True
+    daily_recipient_limit: int = 288
+
+
+@dataclass(frozen=True, slots=True)
+class EmailSettings:
+    mailboxes: tuple[EmailMailbox, ...]
     recipients: tuple[str, ...]
     cc: tuple[str, ...] = ()
-    use_starttls: bool = True
     subject_prefix: str = "Binance账户监控"
 
 
@@ -37,20 +44,49 @@ def _split_addresses(value: Any) -> tuple[str, ...]:
 
 def load_email_settings(path: Path) -> EmailSettings:
     data = json.loads(path.read_text(encoding="utf-8"))
-    address = str(data.get("address", "smtp://localhost:25"))
-    # Supports the existing account_zdl/config/email.json shape.
-    address = address.replace("smtps://", "").replace("smtp://", "")
-    host, _, port_text = address.partition(":")
-    port = int(port_text or (465 if str(data.get("address", "")).startswith("smtps") else 25))
+    raw_mailboxes = data.get("mailboxes")
+    if raw_mailboxes is None:
+        # Backward compatibility for the original single-mailbox format.
+        raw_mailboxes = [{
+            "id": data.get("id") or data.get("sender") or data.get("user") or "primary",
+            "address": data.get("address", "smtp://localhost:25"),
+            "user": data.get("user", ""), "pass": data.get("pass", ""),
+            "sender": data.get("sender") or data.get("user", ""),
+            "use_starttls": data.get("use_starttls"),
+            "daily_recipient_limit": data.get("daily_recipient_limit", 288),
+        }]
+    if not isinstance(raw_mailboxes, list) or not raw_mailboxes:
+        raise ValueError("email mailboxes must be a non-empty list")
+    mailboxes = []
+    seen_ids = set()
+    for index, item in enumerate(raw_mailboxes, 1):
+        if not isinstance(item, dict):
+            raise ValueError("each email mailbox must be an object")
+        address = str(item.get("address", "smtp://localhost:25"))
+        scheme = "smtps" if address.startswith("smtps://") else "smtp"
+        address = address.removeprefix("smtps://").removeprefix("smtp://")
+        host, _, port_text = address.partition(":")
+        port = int(port_text or (465 if scheme == "smtps" else 25))
+        mailbox_id = str(item.get("id") or item.get("sender") or item.get("user") or f"mailbox-{index}").strip()
+        if not mailbox_id or mailbox_id in seen_ids:
+            raise ValueError("email mailbox ids must be non-empty and unique")
+        seen_ids.add(mailbox_id)
+        limit = int(item.get("daily_recipient_limit", 288))
+        if limit < 1:
+            raise ValueError("daily_recipient_limit must be a positive integer")
+        use_starttls = item.get("use_starttls")
+        if use_starttls is None:
+            use_starttls = port != 465
+        mailboxes.append(EmailMailbox(
+            mailbox_id=mailbox_id, smtp_host=host, smtp_port=port,
+            username=str(item.get("user", "")), password=str(item.get("pass", "")),
+            sender=str(item.get("sender") or item.get("user", "")),
+            use_starttls=bool(use_starttls), daily_recipient_limit=limit,
+        ))
     return EmailSettings(
-        smtp_host=host,
-        smtp_port=port,
-        username=str(data.get("user", "")),
-        password=str(data.get("pass", "")),
-        sender=str(data.get("sender") or data.get("user", "")),
+        mailboxes=tuple(mailboxes),
         recipients=_split_addresses(data.get("recipients", data.get("sendUser"))),
         cc=_split_addresses(data.get("cc", data.get("ccUser"))),
-        use_starttls=bool(data.get("use_starttls", port != 465)),
         subject_prefix=str(data.get("subject_prefix") or data.get("sendTitle", "Binance账户监控")),
     )
 

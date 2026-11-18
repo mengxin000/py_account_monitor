@@ -192,7 +192,8 @@ def _send_reports_with_snapshot(settings, subject: str, html_body: str, attachme
                     temporary_path.unlink(missing_ok=True)
                 except OSError:
                     LOGGER.warning("could not remove temporary attachment path=%s", temporary_path, exc_info=True)
-    send_reports(settings, subject, html_body, mail_attachments)
+    send_reports(settings, subject, html_body, mail_attachments,
+                 quota_state_path=base / "runtime" / "email_pool_usage.jsonl")
     return len(mail_attachments)
 
 
