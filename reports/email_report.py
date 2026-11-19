@@ -7,7 +7,7 @@ import os
 import smtplib
 import threading
 import time
-from datetime import date, datetime
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -20,8 +20,9 @@ LOGGER = logging.getLogger("binance_email_report")
 _QUOTA_LOCK = threading.Lock()
 
 
-def _daily_usage(path: Path, quota_day: str) -> dict[str, int]:
+def _rolling_usage(path: Path, now: datetime) -> dict[str, int]:
     usage: dict[str, int] = {}
+    cutoff = now - timedelta(hours=24)
     if not path.exists():
         return usage
     with path.open("r", encoding="utf-8") as source:
@@ -30,7 +31,10 @@ def _daily_usage(path: Path, quota_day: str) -> dict[str, int]:
                 continue
             try:
                 row = json.loads(line)
-                if row.get("quota_day") == quota_day:
+                # Old ledgers used server-local timestamps without an offset.
+                # astimezone interprets those in the host timezone.
+                reserved_at = datetime.fromisoformat(row["reserved_at"]).astimezone(timezone.utc)
+                if reserved_at > cutoff:
                     mailbox_id = str(row["mailbox_id"])
                     count = int(row["recipient_count"])
                     if count < 0:
@@ -42,17 +46,18 @@ def _daily_usage(path: Path, quota_day: str) -> dict[str, int]:
 
 
 def _choose_and_reserve(settings: EmailSettings, recipient_count: int, quota_path: Path,
-                         quota_day: str) -> tuple[EmailMailbox, int]:
+                        *, now: datetime | None = None) -> tuple[EmailMailbox, int]:
     with _QUOTA_LOCK:
-        usage = _daily_usage(quota_path, quota_day)
+        now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        usage = _rolling_usage(quota_path, now)
         for mailbox in settings.mailboxes:
             current = usage.get(mailbox.mailbox_id, 0)
             if current + recipient_count <= mailbox.daily_recipient_limit:
                 row = {
-                    "quota_day": quota_day,
+                    "quota_day": now.astimezone().date().isoformat(),
                     "mailbox_id": mailbox.mailbox_id,
                     "recipient_count": recipient_count,
-                    "reserved_at": datetime.now().isoformat(timespec="seconds"),
+                    "reserved_at": now.isoformat(),
                 }
                 quota_path.parent.mkdir(parents=True, exist_ok=True)
                 with quota_path.open("a", encoding="utf-8", newline="\n") as output:
@@ -60,7 +65,7 @@ def _choose_and_reserve(settings: EmailSettings, recipient_count: int, quota_pat
                     output.flush()
                     os.fsync(output.fileno())
                 return mailbox, current + recipient_count
-    raise RuntimeError(f"all email mailboxes reached daily recipient limit; recipients={recipient_count}")
+    raise RuntimeError(f"no email mailbox has enough rolling 24h quota; recipients={recipient_count}")
 
 
 def _deliver(mailbox: EmailMailbox, message: EmailMessage, recipients: list[str]) -> None:
@@ -135,8 +140,7 @@ def send_reports(settings: EmailSettings, subject: str, html_body: str, attachme
         message.add_attachment(data, maintype=maintype, subtype=subtype, filename=attachment.name)
 
     quota_path = quota_state_path or Path("runtime/email_pool_usage.jsonl")
-    quota_day = date.today().isoformat()
-    mailbox, used = _choose_and_reserve(settings, len(recipients), quota_path, quota_day)
+    mailbox, used = _choose_and_reserve(settings, len(recipients), quota_path)
     message["From"] = mailbox.sender
     try:
         _deliver(mailbox, message, recipients)
