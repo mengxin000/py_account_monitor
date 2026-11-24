@@ -71,7 +71,7 @@ try:
 except ImportError:
     from connections.diagnostics import connection_error
 _SAFE_SYMBOL = re.compile(r"^[A-Z0-9_.-]+$")
-FUNDING_POLL_TIMES = ((0, 5), (8, 5), (16, 5))
+FUNDING_POLL_TIMES = tuple((hour, 5) for hour in range(24))
 
 
 @dataclass(frozen=True, slots=True)
