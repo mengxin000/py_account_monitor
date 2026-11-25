@@ -230,6 +230,7 @@ class HyperliquidCollector:
         if self.account_mode == "default":
             return await self._default_equity(total, balances, dex_meta, tokens, conversion_rate, conversion)
         positions = []
+        position_state_times = {}
         max_ratio = 0.0
         maintenance_by_token, isolated_by_token = {}, {}
         if self.perp_states is None or time.monotonic() - self.perp_states_at > 30:
@@ -245,6 +246,7 @@ class HyperliquidCollector:
                 # An absent WS state is not proof of an empty account.
                 state = await self.rest.info("clearinghouseState", user=self.address, dex=dex)
                 self.perp_states[dex] = state
+            position_state_times[dex] = state.get("time")
             active_positions = []
             for row in state["assetPositions"]:
                 p = row["position"]
@@ -286,6 +288,8 @@ class HyperliquidCollector:
             raise ValueError("Hyperliquid equity non-finite")
         self.last_at, self.equity = datetime.now(), total
         return {"equity": total, "positions": positions, "balances": balances,
+                "positionStateTimesMs": position_state_times,
+                "positionCollateral": {dex: tokens.get(int(meta.get("collateralToken", 0))) for dex, meta in dex_meta.items()},
                 "mmr": max_ratio, "mode": "unifiedAccount", "usdcToUsdt": conversion["USDC"]}
 
     async def _default_equity(self, total, balances, dex_meta, tokens, conversion_rate, conversion):
@@ -331,6 +335,8 @@ class HyperliquidCollector:
             raise ValueError("Hyperliquid equity non-finite")
         self.last_at, self.equity = datetime.now(), total
         return {"equity": total, "positions": positions, "balances": balances,
+                "positionStateTimesMs": {dex: state.get("time") for dex, state in states.items()},
+                "positionCollateral": {dex: tokens.get(int(meta.get("collateralToken", 0))) for dex, meta in dex_meta.items()},
                 "perpEquities": components, "mmr": max_ratio, "mode": "default",
                 "usdcToUsdt": conversion["USDC"]}
 

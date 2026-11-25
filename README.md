@@ -252,6 +252,8 @@ first_report_delay_seconds是程序启动后第一封邮件发送时间，report
 
 ## 启动
 
+对于 Binance USDⓈ-M + Hyperliquid 组合，每轮正式报告同时在同目录生成独立的 `basis_diagnostic.html`，不随邮件发送。取当日第一份时间对齐的双边持仓为诊断基准；部署当天不会回填 09:30。双边诊断快照随 `equity.json` 保存并在同一交易日重启后恢复。此表不改变正式损益、权益基准或原波动损益。
+
 激活uv并将项目依赖与环境进行同步：
 
 

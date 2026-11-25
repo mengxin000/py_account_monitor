@@ -53,6 +53,10 @@ except ImportError:
 from .binance.normalize import source_metadata
 from .binance.equity import spot_equity
 from .hyperliquid.account import HyperliquidCollector
+try:
+    from ..core.basis_diagnostic import make_snapshot as make_basis_snapshot
+except ImportError:
+    from core.basis_diagnostic import make_snapshot as make_basis_snapshot
 from .okx.integrated import IntegratedOKXCollector, valuation_rates as okx_valuation_rates
 try:
     from ..connections.bybit import BybitCredentials, BybitPrivateStream, BybitRestClient
@@ -339,6 +343,7 @@ class BinanceAccountMonitor:
         self._baseline_at: datetime | None = None
         self._baseline_day: str | None = None
         self._baseline_positions: Any = []
+        self._basis_baseline = None
         self._last_funding_at: datetime | None = None
         # Funding REST results are queried repeatedly (and after restarts), so
         # keep the Binance transaction IDs in memory for de-duplication.
@@ -373,6 +378,8 @@ class BinanceAccountMonitor:
                 self._baseline_day = trading_day()
                 return
             self._baseline_components = row.get("baselineComponents")
+            if row.get("tradingDay") == trading_day():
+                self._basis_baseline = row.get("baselineBasisSnapshot")
             self._legacy_baseline = row.get("previousScopeBaseline")
             if row.get("baselineEquity") is not None:
                 self._baseline_equity = float(row["baselineEquity"])
@@ -485,6 +492,7 @@ class BinanceAccountMonitor:
         day = trading_day(now)
         pm_account = None
         futures_account = None
+        bn_basis_positions = bn_basis_at = None
         spot_value = 0.0 if self.config.spot_mode == "none" else None
         usdm_value = 0.0 if self.config.futures_mode != "usdm" else None
         assets = []
@@ -557,6 +565,8 @@ class BinanceAccountMonitor:
                 if self.config.include_positions:
                     try:
                         futures_account["positions"] = await self.usdm_rest.get("/fapi/v3/positionRisk", signed=True)
+                        bn_basis_positions = futures_account["positions"]
+                        bn_basis_at = datetime.now()
                     except Exception:
                         LOGGER.debug("USDⓈ-M position snapshot unavailable account=%s", self.config.account_id)
                 self._rest_errors.pop("usdm", None)
@@ -611,6 +621,7 @@ class BinanceAccountMonitor:
             self._baseline_at = None
             self._baseline_day = day
             self._baseline_components = None
+            self._basis_baseline = None
             self._legacy_baseline = None
         pm = float(pm_account["actualEquity"]) * self.config.pm_usd_to_usdt if pm_account else (0.0 if not self.uses_pm else None)
         components = [value for value in (pm, spot_value, usdm_value, hl_value, okx_value) if value is not None]
@@ -646,6 +657,28 @@ class BinanceAccountMonitor:
                 LOGGER.info("combined equity baseline initialized account=%s day=%s time=%s", self.config.account_id, day, self._baseline_at)
             if component_times:
                 self._last_account_at = max(component_times)
+        basis_latest = None
+        if self.hyperliquid and self.config.futures_mode == "usdm":
+            try:
+                basis_latest = make_basis_snapshot(bn_basis_positions, hl_snapshot, bn_basis_at, hl_time,
+                                                   datetime.now(), self.config.hyperliquid.get("symbol_map", {}))
+                if basis_latest:
+                    if self._basis_baseline and self._basis_baseline.get("hyperliquidMode") != basis_latest["hyperliquidMode"]:
+                        self._basis_baseline = None
+                    # Do not freeze yesterday's cached Hyperliquid marks as today's opening baseline.
+                    state_times = basis_latest["hyperliquidStateTimesMs"]
+                    fresh = bool(state_times) and all(
+                        ms is not None and abs(bn_basis_at.timestamp() - int(ms) / 1000) <= 30
+                        and trading_day(datetime.fromtimestamp(int(ms) / 1000)) == day
+                        for ms in state_times.values()
+                    )
+                    if not fresh:
+                        basis_latest = None
+                    elif self._basis_baseline is None:
+                        self._basis_baseline = basis_latest
+            except Exception:
+                basis_latest = None
+                LOGGER.warning("basis diagnostic snapshot failed account=%s", self.config.account_id, exc_info=True)
         state = {
             "schemaVersion": 2, "equityScope": self._equity_scope,
             "valuationCurrency": "USDT", "pmUsdToUsdt": self.config.pm_usd_to_usdt,
@@ -672,6 +705,8 @@ class BinanceAccountMonitor:
             "okxState": okx_snapshot,
             "spotAssets": assets, "errors": dict(self._rest_errors),
             "baselinePositions": self._baseline_positions,
+            "baselineBasisSnapshot": self._basis_baseline,
+            "latestBasisSnapshot": basis_latest,
             "latestPositions": ((futures_account if self.config.futures_mode == "usdm" else pm_account) or {}).get("positions", []),
         }
         self.store.write_equity_state(state, now=now)

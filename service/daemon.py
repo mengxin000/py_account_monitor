@@ -27,6 +27,7 @@ try:
     from ..reports.html_report import build_html
     from ..reports.report_data import load_report_data
     from ..reports.funding import configured_markets
+    from ..reports.basis_diagnostic import build_basis_diagnostic
     from ..replay.batch_replay import replay_day, load_underlying_alias, read_trade_sources
     from ..collectors.market_collector import MarketCollector
 except ImportError:  # running from the project directory
@@ -37,6 +38,7 @@ except ImportError:  # running from the project directory
     from reports.html_report import build_html
     from reports.report_data import load_report_data
     from reports.funding import configured_markets
+    from reports.basis_diagnostic import build_basis_diagnostic
     from replay.batch_replay import replay_day, load_underlying_alias, read_trade_sources
     from collectors.market_collector import MarketCollector
 
@@ -67,11 +69,19 @@ def _generate_and_send_reports(monitors, email_path, base, day, service_config=N
         html_parts = [f"<h2>Binance账户监控报告 {day}</h2>"]
         aliases = load_underlying_alias()
         for monitor in monitors:
+            day_dir = monitor.store.root / day
+            output_dir = base / "output" / monitor.config.account_id / day
+            if (getattr(monitor, "hyperliquid", None) and getattr(monitor.config, "futures_mode", None) == "usdm"
+                    and day_dir.exists()):
+                try:
+                    build_basis_diagnostic(day_dir / "equity.json", output_dir / "basis_diagnostic.html",
+                                           monitor.config.account_id, day, aliases)
+                except Exception:
+                    LOGGER.exception("basis diagnostic failed account=%s", monitor.config.account_id)
             try:
                 okx = getattr(monitor, "okx", None)
                 if okx and okx.report_error:
                     raise RuntimeError(f"OKX data reconciliation incomplete: {okx.report_error}")
-                day_dir = monitor.store.root / day
                 if not day_dir.exists():
                     continue
                 sources = read_trade_sources(day_dir)
@@ -80,7 +90,6 @@ def _generate_and_send_reports(monitors, email_path, base, day, service_config=N
                 data = load_report_data(day_dir, monitor.config.account_id,
                                         aliases=aliases, trade_sources=sources)
                 data.funding_markets = configured_markets(monitor.config)
-                output_dir = base / "output" / monitor.config.account_id / day
                 xlsx = build_workbook(data, output_dir / f"{monitor.config.account_id}_{day}.xlsx")
                 html_path = build_html(data, output_dir / f"{monitor.config.account_id}_{day}.html")
                 attachments.append(xlsx)
