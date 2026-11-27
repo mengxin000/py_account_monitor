@@ -113,3 +113,16 @@ def basis_rows(baseline, latest, aliases):
             change = end[-1] - start[-1]
         rows.append((symbol, legs, start, end, change, start_error or end_error))
     return rows
+
+
+def basis_total(baseline, latest, aliases):
+    """Return a complete total; missing samples or partial coverage are not zero."""
+    for snapshot in (baseline, latest):
+        if not isinstance(snapshot, dict) or any(
+            not isinstance(snapshot.get(leg), list) for leg in ("binance", "hyperliquid")
+        ):
+            return None
+    changes = [row[4] for row in basis_rows(baseline, latest, aliases)]
+    if any(change is None for change in changes):
+        return None
+    return sum(changes, Decimal(0))

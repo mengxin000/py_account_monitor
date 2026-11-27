@@ -3,6 +3,7 @@
 现有 `MatchOrder` 和 `MatchRecord` 不替换，`id` 仍为 CID，`system_id` 仍为 SID。
 新增可选 `reference_sid`（默认空字符串），用于显式指向另一笔订单，不能覆盖订单自身 ID。
 Hyperliquid 适配器从 `0xb<SID>b<后缀>` 生成此字段；历史 JSONL 缺少字段时在内存中解析，原文件不改写。
+Binance 适配器从 `<账户ID>h_<HL oid>_<数字序号>` 提取反向引用，例如 `mfxh_617578469425_0`。前缀必须和本记录的账户 ID 一致；该引用仅指向 Hyperliquid 的系统订单号。多笔 Binance 对冲可引用同一个 HL oid，各自使用不同序号。
 
 ## 规则表
 
@@ -13,8 +14,8 @@ Hyperliquid 适配器从 `0xb<SID>b<后缀>` 生成此字段；历史 JSONL 缺�
 | Binance / Binance | 原有四种 CID/SID、CID/CID 包含关系 |
 | Binance / OKX | 同上 |
 | OKX / OKX | 同上；交易程序必须遵守关联 ID 约定 |
-| Binance / Hyperliquid | Hyper 引用 SID 完整匹配另一边 SID |
-| OKX / Hyperliquid | 同上，Hyper 必须编码 OKX ordId |
+| Binance / Hyperliquid | HL 的 cloid 引用 Binance i，或 Binance 的 c 引用 HL oid，两种都做完整字符串比较 |
+| OKX / Hyperliquid | HL 必须在 cloid 编码 OKX ordId |
 | 未配置组合（包括 Hyper / Hyper） | 不做普通关联匹配 |
 
 规则函数只返回 bool，不更改订单、不扣数量、不算收益。原有 account_id、方向和 exposure 标记限制继续保留；同标的分组仍由回放层和实时引擎完成。

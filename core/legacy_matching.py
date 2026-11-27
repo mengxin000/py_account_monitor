@@ -13,11 +13,13 @@ from .order_linking import is_matching_order, orders_linked, validate_candidates
 def quoted_spread_from_client_id(client_id: str, market_type: str) -> float | None:
     if market_type != "futures":
         return None
-    parts = client_id.rsplit("_", 1)
-    if len(parts) != 2:
+    # The quoted spread is the fourth field, not the last numeric suffix.
+    # A reverse hedge CID such as mfxh_<HL oid>_<seq> has no spread field.
+    parts = client_id.split("_", 4)
+    if len(parts) < 4:
         return None
     try:
-        return int(parts[1]) / 100_000.0
+        return int(parts[3]) / 100_000.0
     except ValueError:
         return None
 

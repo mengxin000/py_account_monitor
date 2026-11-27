@@ -1,10 +1,20 @@
 """Binance-specific execution parsing, independent of the matching engine."""
+import re
 import time
 from typing import Any, Mapping
 try:
     from ...core.models import MatchOrder
 except ImportError:
     from core.models import MatchOrder
+
+
+def hyperliquid_oid_from_client_id(client_id: str, account_id: str) -> str:
+    """Recognize a Binance hedge CID of the form <account>h_<HL oid>_<seq>."""
+    if not account_id:
+        return ""
+    match = re.fullmatch(rf"{re.escape(account_id)}h_([0-9]+)_[0-9]+", client_id)
+    return match.group(1) if match else ""
+
 
 def normalize_order(event: Mapping[str, Any]) -> MatchOrder:
     """Build a MatchOrder from Binance PM/Futures or Spot order payload."""
@@ -45,14 +55,18 @@ def normalize_order(event: Mapping[str, Any]) -> MatchOrder:
                 break
 
     symbol = str(value("s", "symbol", default="") or "").upper()
+    exchange = str(event.get("exchange", "binance"))
+    account_id = str(event.get("accountId", "") or "")
+    client_id = str(value("c", "clientOrderId", default=""))
     conversion = event.get("_valuationRates", {})
     quote_rate = float(conversion.get("USDC", 1)) if symbol.endswith("USDC") else 1.0
     fee_rate = float(conversion.get(spot_N, 1)) if spot_N in ("USDT", "USDC") else quote_rate
     return MatchOrder(
-        exchange=str(event.get("exchange", "binance")),
-        account_id=str(event.get("accountId", "")),
+        exchange=exchange,
+        account_id=account_id,
         account_scope=str(event.get("accountScope", "unknown")),
-        id=str(value("c", "clientOrderId", default="")),
+        id=client_id,
+        reference_sid=hyperliquid_oid_from_client_id(client_id, account_id) if exchange == "binance" else "",
         system_id=str(value("i", "orderId", default="")),
         side=str(value("S", "side", default="")),
         status=str(value("X", "x", "status", default="")),

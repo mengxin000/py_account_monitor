@@ -38,9 +38,16 @@ def reference_sid(order):
     return order.reference_sid
 
 
+def _references_order(source, target):
+    # Binance's normalized reference is specifically a Hyperliquid oid.
+    if source.exchange == "binance" and target.exchange != "hyperliquid":
+        return False
+    sid = reference_sid(source)
+    return bool(sid and sid == target.system_id)
+
+
 def references_sid(a, b):
-    return bool((reference_sid(a) and reference_sid(a) == b.system_id)
-                or (reference_sid(b) and reference_sid(b) == a.system_id))
+    return _references_order(a, b) or _references_order(b, a)
 
 
 # Unordered pairs: each symmetric cell is declared only once. Unknown pairs
@@ -109,7 +116,7 @@ def validate_candidates(current, candidates, rule_table=None):
     def targets_current(order):
         rule = (RULE_TABLE if rule_table is None else rule_table).get(frozenset((current.exchange, order.exchange)))
         if rule is references_sid:
-            return bool(current.system_id and reference_sid(order) == current.system_id)
+            return _references_order(order, current)
         return bool(rule is contains_ids and current.system_id and current.system_id in order.id
                     and not (order.system_id and order.system_id in current.id))
     if all(targets_current(order) for order in candidates):

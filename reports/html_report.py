@@ -31,6 +31,7 @@ def build_html(data: ReportData, path: Path) -> Path:
     ) or "<tr><td colspan='8'>暂无成交记录</td></tr>"
     metrics = [
         ("实际损益", summary["actual_profit"]),
+        ("双边基差损益", data.basis_profit if data.basis_profit is not None else "—"),
         ("交易损益", summary["trade_profit"]),
         ("费率损益", summary["fee_profit"]),
         ("总成交量(U)", total_quantity),

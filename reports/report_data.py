@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 from .funding import funding_breakdown
 try:
+    from ..core.basis_diagnostic import basis_total
     from ..core.models import callback_event
     from ..replay.batch_replay import load_underlying_alias, _exposure_key, read_trade_sources
 except ImportError:
+    from core.basis_diagnostic import basis_total
     from core.models import callback_event
     from replay.batch_replay import load_underlying_alias, _exposure_key, read_trade_sources
 
@@ -52,6 +55,7 @@ class ReportData:
     equity_scope: str = "legacy_pm"
     underlying_alias: dict[str, str] = field(default_factory=load_underlying_alias)
     funding_markets: list[tuple[str, str]] = field(default_factory=list)
+    basis_profit: float | None = None
 
     def funding_details(self) -> list[dict[str, Any]]:
         return funding_breakdown(self.funding, self.funding_markets)
@@ -247,6 +251,14 @@ def load_report_data(day_dir: Path, account_id: str, *, aliases: dict[str, str] 
         baseline_equity = float(baseline["equity"]) if baseline else None
     except (TypeError, ValueError):
         baseline_equity = None
+    basis_profit = None
+    try:
+        total = basis_total(state.get("baselineBasisSnapshot"), state.get("latestBasisSnapshot"), aliases)
+        if total is not None:
+            basis_profit = float(total)
+    except (ArithmeticError, AttributeError, KeyError, TypeError, ValueError):
+        logging.getLogger(__name__).warning("invalid basis snapshots account=%s day=%s",
+                                            account_id, day_dir.name, exc_info=True)
     return ReportData(
         underlying_alias=aliases,
         account_id=account_id,
@@ -271,4 +283,5 @@ def load_report_data(day_dir: Path, account_id: str, *, aliases: dict[str, str] 
         current_positions=state.get("latestPositions", []),
         equity_state_present=bool(state),
         equity_scope=str(state.get("equityScope", "legacy_pm")),
+        basis_profit=basis_profit,
     )
